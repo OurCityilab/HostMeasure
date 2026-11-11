@@ -1,0 +1,6 @@
+{
+  "name": "HostMeasure DC",
+  "description": "Help Washington, DC homeowners decide whether to list their home on Airbnb by checking DC short-term rental eligibility, comparing nearby listings, and modeling realistic income after costs.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

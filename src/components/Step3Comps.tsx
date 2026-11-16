@@ -1,7 +1,8 @@
-import React, { useState } from "react";
+import React, { useMemo, useState } from "react";
 import {
   AlertTriangle,
   Camera,
+  Check,
   ExternalLink,
   Filter,
   Maximize2,
@@ -9,6 +10,7 @@ import {
   X,
 } from "lucide-react";
 import { DC_RULES } from "../../config/dcRules";
+import { amenityGaps, categorizeAmenityGaps } from "../../engine/amenities";
 import { summarizePropertyCondition } from "../../engine/condition";
 import {
   AdjustmentLogEntry,
@@ -38,6 +40,8 @@ interface Step3CompsProps {
   compSelectionA: CompSelectionResult;
   compSelectionB: CompSelectionResult;
   onlyHostsLikeMe: boolean;
+  ownerAmenities: string[];
+  onScrollToStep1?: () => void;
   onToggleOnlyHostsLikeMe: (next: boolean) => void;
   onExcludeComp: (
     pathId: "pathA" | "pathB",
@@ -45,6 +49,7 @@ interface Step3CompsProps {
     reasonText: string
   ) => void;
   onAddPinnedComp: (card: ParsedPdfListing) => void;
+  onAddCustomComp?: (customListing: Listing, photos: PropertyPhoto[]) => void;
   adjustmentsLog: AdjustmentLogEntry[];
   excludedCount: number;
   onResetExclusions: () => void;
@@ -62,16 +67,18 @@ interface Step3CompsProps {
   onApplyAiRating: (
     photoId: string,
     rating: {
-      score: ConditionScoreValue;
+      score: ConditionScoreValue | null;
+      isNa?: boolean;
       confidence: AiConfidence;
       observations: string[];
       ratedAt: string;
       room?: PropertyRoomType;
     }
   ) => void;
+  onClearAllAiRatings?: () => void;
   onApplyDeskRating: (
     photoId: string,
-    score: ConditionScoreValue,
+    score: ConditionScoreValue | null,
     ratedAt: string
   ) => void;
   onLogDeskReviewStart: (seed: string) => void;
@@ -96,9 +103,12 @@ export const Step3Comps: React.FC<Step3CompsProps> = ({
   compSelectionA,
   compSelectionB,
   onlyHostsLikeMe,
+  ownerAmenities,
+  onScrollToStep1,
   onToggleOnlyHostsLikeMe,
   onExcludeComp,
   onAddPinnedComp,
+  onAddCustomComp,
   adjustmentsLog,
   excludedCount,
   onResetExclusions,
@@ -114,6 +124,7 @@ export const Step3Comps: React.FC<Step3CompsProps> = ({
   onRemovePhoto,
   onMarkPhotoUnavailable,
   onApplyAiRating,
+  onClearAllAiRatings,
   onApplyDeskRating,
   onLogDeskReviewStart,
   onDeskReviewCompleted,
@@ -135,6 +146,9 @@ export const Step3Comps: React.FC<Step3CompsProps> = ({
   const [failedImageUrls, setFailedImageUrls] = useState<Set<string>>(
     () => new Set()
   );
+  const [showAllAmenitiesTable, setShowAllAmenitiesTable] =
+    useState<boolean>(false);
+  const [isStandardOpen, setIsStandardOpen] = useState<boolean>(false);
 
   const handleImageError = (url: string) => {
     setFailedImageUrls((prev) => {
@@ -146,6 +160,16 @@ export const Step3Comps: React.FC<Step3CompsProps> = ({
 
   const activeSelection =
     activePath === "pathA" ? compSelectionA : compSelectionB;
+
+  const currentComps = activeSelection.comps;
+  const gaps = useMemo(
+    () => amenityGaps(ownerAmenities, currentComps),
+    [ownerAmenities, currentComps]
+  );
+  const { missingFromHome, uniqueToHome, standardForComps } = useMemo(
+    () => categorizeAmenityGaps(gaps),
+    [gaps]
+  );
 
   const subjectSummary = summarizePropertyCondition(
     "subject",
@@ -347,8 +371,14 @@ export const Step3Comps: React.FC<Step3CompsProps> = ({
                   key={`${card.listingId || card.title}-${idx}`}
                   card={card}
                   mode="step3"
+                  listings={listings}
+                  subjectHomePoint={home.customPin ?? undefined}
                   onApply={(cardToApply) => {
                     onAddPinnedComp(cardToApply);
+                    setPdfReviewCards((prev) => prev.filter((_, i) => i !== idx));
+                  }}
+                  onApplyCustom={(customListing, photos) => {
+                    onAddCustomComp?.(customListing, photos);
                     setPdfReviewCards((prev) => prev.filter((_, i) => i !== idx));
                   }}
                   onDismiss={() => {
@@ -387,6 +417,7 @@ export const Step3Comps: React.FC<Step3CompsProps> = ({
         onAddPhotos={onAddPhotos}
         onMarkPhotoUnavailable={onMarkPhotoUnavailable}
         onApplyAiRating={onApplyAiRating}
+        onClearAllAiRatings={onClearAllAiRatings}
         onApplyDeskRating={onApplyDeskRating}
         onLogDeskReviewStart={onLogDeskReviewStart}
         onDeskReviewCompleted={onDeskReviewCompleted}
@@ -404,7 +435,15 @@ export const Step3Comps: React.FC<Step3CompsProps> = ({
             Your Home:{" "}
             <strong className="font-mono tabular-nums text-emerald-900">
               {subjectSummary.activeScore !== null
-                ? `${subjectSummary.activeScore.toFixed(1)} / 6.0`
+                ? `${subjectSummary.activeScore.toFixed(1)} / 6.0${
+                    subjectSummary.photoCount > 0
+                      ? ` (${
+                          activeScoringMethod === "ai"
+                            ? subjectSummary.aiRatedCount
+                            : subjectSummary.deskRatedCount
+                        } of ${subjectSummary.photoCount} photos)`
+                      : ""
+                  }`
                 : "Not rated"}
             </strong>
           </span>
@@ -692,27 +731,53 @@ export const Step3Comps: React.FC<Step3CompsProps> = ({
                         )}
 
                         <div className="min-w-0 max-w-[210px] space-y-0.5">
-                          <a
-                            href={`https://www.airbnb.com/rooms/${comp.id}`}
-                            target="_blank"
-                            rel="noopener noreferrer"
-                            className="font-medium text-slate-900 hover:text-emerald-800 hover:underline inline-flex items-center gap-1 truncate max-w-full"
-                            title={`${comp.name} (Airbnb ID: ${comp.id})`}
-                          >
-                            <span className="truncate">{comp.name}</span>
-                            <ExternalLink className="w-3 h-3 shrink-0 text-slate-400" />
-                          </a>
-                          {comp.isPinned && (
-                            <div>
+                          {comp.id.startsWith("custom-") ? (
+                            <span
+                              className="font-medium text-slate-900 inline-flex items-center gap-1 truncate max-w-full"
+                              title={`${comp.name} (Custom comparison)`}
+                            >
+                              <span className="truncate">{comp.name}</span>
+                            </span>
+                          ) : (
+                            <a
+                              href={`https://www.airbnb.com/rooms/${comp.id}`}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="font-medium text-slate-900 hover:text-emerald-800 hover:underline inline-flex items-center gap-1 truncate max-w-full"
+                              title={`${comp.name} (Airbnb ID: ${comp.id})`}
+                            >
+                              <span className="truncate">{comp.name}</span>
+                              <ExternalLink className="w-3 h-3 shrink-0 text-slate-400" />
+                            </a>
+                          )}
+                          <div className="flex flex-wrap items-center gap-1">
+                            {comp.isCustom ? (
+                              <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-semibold bg-blue-100 text-blue-800 border border-blue-300">
+                                Custom
+                              </span>
+                            ) : comp.isPinned ? (
                               <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-semibold bg-emerald-100 text-emerald-800 border border-emerald-300">
                                 Added by you
                               </span>
-                            </div>
-                          )}
+                            ) : null}
+                            {comp.cityWarning && (
+                              <span
+                                className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-semibold bg-amber-100 text-amber-800 border border-amber-300"
+                                title={comp.cityWarning}
+                              >
+                                Outside DC
+                              </span>
+                            )}
+                          </div>
                           <div className="text-[11px] text-slate-500 truncate">
-                            {comp.neighbourhood} · Host runs{" "}
-                            {comp.host_listing_count}{" "}
-                            {comp.host_listing_count === 1 ? "listing" : "listings"}
+                            {comp.neighbourhood} ·{" "}
+                            {comp.isCustom
+                              ? "Host: N/A"
+                              : `Host runs ${comp.host_listing_count} ${
+                                  comp.host_listing_count === 1
+                                    ? "listing"
+                                    : "listings"
+                                }`}
                           </div>
                         </div>
                       </div>
@@ -765,10 +830,16 @@ export const Step3Comps: React.FC<Step3CompsProps> = ({
                       )}
                     </td>
                     <td className="py-2.5 px-2.5 text-right font-mono tabular-nums text-slate-700">
-                      {Math.round(comp.est_nights_ltm)}{" "}
-                      <span className="text-[10px] font-sans text-slate-400">
-                        est.
-                      </span>
+                      {comp.isCustom ? (
+                        <span className="text-slate-400 font-sans">N/A</span>
+                      ) : (
+                        <>
+                          {Math.round(comp.est_nights_ltm)}{" "}
+                          <span className="text-[10px] font-sans text-slate-400">
+                            est.
+                          </span>
+                        </>
+                      )}
                     </td>
                     <td className="py-2.5 px-2.5 text-right font-mono tabular-nums text-slate-700 whitespace-nowrap">
                       {comp.bedrooms === 0 ? "Studio" : `${comp.bedrooms} BR`} /{" "}
@@ -778,7 +849,11 @@ export const Step3Comps: React.FC<Step3CompsProps> = ({
                       {comp.miles.toFixed(2)}
                     </td>
                     <td className="py-2.5 px-2.5 text-slate-700 capitalize">
-                      {comp.license_status}
+                      {comp.isCustom ? (
+                        <span className="text-slate-400 font-sans">N/A</span>
+                      ) : (
+                        comp.license_status
+                      )}
                     </td>
                     <td className="py-2.5 px-3 text-slate-600 whitespace-nowrap">
                       {comp.whyChosen}
@@ -825,6 +900,199 @@ export const Step3Comps: React.FC<Step3CompsProps> = ({
       {/* Caption under the table */}
       <div className="text-[11px] text-slate-500 pt-1 px-1">
         Photos: listing cover images via Inside Airbnb. Hosts own their photos. Images are linked, not stored.
+      </div>
+
+      {/* CARD: Amenity Gap Analysis (per active path) */}
+      <div className="rounded-xl border border-slate-200 bg-white p-5 sm:p-6 space-y-4">
+        <div className="flex flex-col sm:flex-row sm:items-baseline justify-between gap-2 pb-3 border-b border-slate-100">
+          <div>
+            <span className="text-xs font-semibold text-emerald-800 tracking-wide uppercase">
+              Amenity Gap Analysis · {activePath === "pathA" ? "Whole Home" : "Private Room"}
+            </span>
+            <h4 className="text-base font-bold text-slate-900 mt-0.5">
+              How your amenities compare
+            </h4>
+          </div>
+          <button
+            type="button"
+            onClick={() => setShowAllAmenitiesTable((prev) => !prev)}
+            className="text-xs font-semibold text-emerald-800 hover:text-emerald-950 underline underline-offset-2 cursor-pointer self-start sm:self-auto"
+          >
+            {showAllAmenitiesTable ? "Hide all 20" : "Show all 20"}
+          </button>
+        </div>
+
+        {ownerAmenities.length === 0 ? (
+          <div className="rounded-lg bg-slate-50 border border-slate-200 p-4 text-center space-y-2">
+            <p className="text-xs text-slate-600 font-medium">
+              Tick what your home offers in Step 1 to see how you compare
+            </p>
+            {onScrollToStep1 && (
+              <button
+                type="button"
+                onClick={onScrollToStep1}
+                className="text-xs font-semibold text-emerald-800 hover:text-emerald-950 underline cursor-pointer"
+              >
+                Go to Step 1: What your home offers
+              </button>
+            )}
+          </div>
+        ) : (
+          <div className="space-y-4">
+            {/* Group 1: Most of your matches offer these, and you don't */}
+            <div className="space-y-2">
+              <div className="flex items-center gap-2">
+                <span className="text-xs font-bold text-slate-900">
+                  Most of your matches offer these, and you don&apos;t
+                </span>
+                <span className="text-xs text-slate-400 font-mono">
+                  ({missingFromHome.length})
+                </span>
+              </div>
+              {missingFromHome.length > 0 ? (
+                <div className="flex flex-wrap gap-2">
+                  {missingFromHome.map((item) => (
+                    <span
+                      key={item.code}
+                      className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold bg-amber-50 text-amber-900 border border-amber-200 shadow-2xs"
+                    >
+                      <span>{item.label}</span>
+                      <span className="text-amber-500 font-mono">·</span>
+                      <span className="font-mono">{item.compCount} of {item.compTotal}</span>
+                    </span>
+                  ))}
+                </div>
+              ) : (
+                <p className="text-xs text-slate-500 italic">
+                  None — your home offers all standard amenities present in &ge;60% of your matches.
+                </p>
+              )}
+            </div>
+
+            {/* Group 2: You offer these, and most matches don't */}
+            <div className="space-y-2 pt-2 border-t border-slate-100">
+              <div className="flex items-center gap-2">
+                <span className="text-xs font-bold text-slate-900">
+                  You offer these, and most matches don&apos;t
+                </span>
+                <span className="text-xs text-slate-400 font-mono">
+                  ({uniqueToHome.length})
+                </span>
+              </div>
+              {uniqueToHome.length > 0 ? (
+                <div className="flex flex-wrap gap-2">
+                  {uniqueToHome.map((item) => (
+                    <span
+                      key={item.code}
+                      className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold bg-emerald-50 text-emerald-900 border border-emerald-200 shadow-2xs"
+                    >
+                      <span>{item.label}</span>
+                      <span className="text-emerald-500 font-mono">·</span>
+                      <span className="font-mono">{item.compCount} of {item.compTotal}</span>
+                    </span>
+                  ))}
+                </div>
+              ) : (
+                <p className="text-xs text-slate-500 italic">
+                  None
+                </p>
+              )}
+            </div>
+
+            {/* Group 3: Standard for homes like yours (collapsed by default) */}
+            <div className="pt-2 border-t border-slate-100">
+              <details
+                open={isStandardOpen}
+                onToggle={(e) => setIsStandardOpen((e.target as HTMLDetailsElement).open)}
+                className="group"
+              >
+                <summary className="cursor-pointer text-xs font-bold text-slate-800 hover:text-slate-950 flex items-center justify-between py-1 select-none">
+                  <span>
+                    Standard for homes like yours ({standardForComps.length})
+                  </span>
+                  <span className="text-[11px] text-slate-500 font-normal group-open:hidden">
+                    Click to expand
+                  </span>
+                  <span className="text-[11px] text-slate-500 font-normal hidden group-open:inline">
+                    Click to collapse
+                  </span>
+                </summary>
+                <div className="pt-2">
+                  {standardForComps.length > 0 ? (
+                    <div className="flex flex-wrap gap-2">
+                      {standardForComps.map((item) => (
+                        <span
+                          key={item.code}
+                          className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium bg-slate-100 text-slate-800 border border-slate-200"
+                        >
+                          <span>{item.label}</span>
+                          <span className="text-slate-400 font-mono">·</span>
+                          <span className="font-mono">{item.compCount} of {item.compTotal}</span>
+                        </span>
+                      ))}
+                    </div>
+                  ) : (
+                    <p className="text-xs text-slate-500 italic">None</p>
+                  )}
+                </div>
+              </details>
+            </div>
+          </div>
+        )}
+
+        {/* Expandable "Show all 20" Table */}
+        {showAllAmenitiesTable && (
+          <div className="pt-3 border-t border-slate-200 space-y-2">
+            <div className="flex items-center justify-between">
+              <span className="text-xs font-bold text-slate-900">
+                All 20 Tracked Amenities ({currentComps.length} active matches)
+              </span>
+            </div>
+            <div className="overflow-x-auto border border-slate-200 rounded-lg">
+              <table className="w-full text-left border-collapse text-xs">
+                <thead>
+                  <tr className="bg-slate-50 border-b border-slate-200 text-slate-600 font-semibold text-[11px]">
+                    <th className="py-2 px-3">Amenity</th>
+                    <th className="py-2 px-3 text-center">Your Home</th>
+                    <th className="py-2 px-3 text-right">Matches Offering</th>
+                    <th className="py-2 px-3 text-right">Match Share</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-100">
+                  {gaps.map((item) => {
+                    const share = item.compTotal > 0 ? item.compCount / item.compTotal : 0;
+                    return (
+                      <tr key={item.code} className="hover:bg-slate-50/50">
+                        <td className="py-2 px-3 font-medium text-slate-900">
+                          {item.label}
+                        </td>
+                        <td className="py-2 px-3 text-center">
+                          {item.ownerHas ? (
+                            <span className="inline-flex items-center gap-1 text-emerald-800 font-semibold text-xs">
+                              <Check className="w-3.5 h-3.5 text-emerald-700" /> Yes
+                            </span>
+                          ) : (
+                            <span className="text-slate-300 font-mono">—</span>
+                          )}
+                        </td>
+                        <td className="py-2 px-3 text-right font-mono text-slate-800">
+                          {item.compCount} of {item.compTotal}
+                        </td>
+                        <td className="py-2 px-3 text-right font-mono text-slate-600">
+                          {Math.round(share * 100)}%
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        )}
+
+        <div className="pt-1 border-t border-slate-100 text-[11px] text-slate-500">
+          For information only. Amenities do not change your income estimate.
+        </div>
       </div>
 
       {/* Lightbox Modal */}

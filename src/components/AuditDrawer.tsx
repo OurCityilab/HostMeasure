@@ -2,12 +2,14 @@ import React from "react";
 import { X } from "lucide-react";
 import { DATA_SNAPSHOT_METADATA } from "../../config/dataSource";
 import { DC_RULES } from "../../config/dcRules";
+import { ACTIVE_MODEL, getModelAccuracy } from "../../config/model";
 import {
   AdjustmentLogEntry,
   CompSelectionResult,
   CostAssumptions,
   DualPathComparison,
   HomeProfile,
+  Listing,
 } from "../../types";
 
 interface AuditDrawerProps {
@@ -21,6 +23,7 @@ interface AuditDrawerProps {
   adjustmentsLog: AdjustmentLogEntry[];
   totalDatasetRows: number;
   isFallbackSample: boolean;
+  customListings?: Listing[];
 }
 
 export const AuditDrawer: React.FC<AuditDrawerProps> = ({
@@ -34,6 +37,7 @@ export const AuditDrawer: React.FC<AuditDrawerProps> = ({
   adjustmentsLog,
   totalDatasetRows,
   isFallbackSample,
+  customListings = [],
 }) => {
   if (!isOpen) return null;
 
@@ -228,9 +232,63 @@ export const AuditDrawer: React.FC<AuditDrawerProps> = ({
           <h3 className="text-sm font-bold text-slate-900">
             4. Scoring Formula &amp; Selected Homes
           </h3>
-          <p className="text-xs text-slate-600 font-mono bg-slate-100 p-2.5 rounded-lg">
-            score = max(0, 100 - 25×|bedrooms diff| - 8×|guests diff| - 10×|bathrooms diff| - 12×miles)
-          </p>
+
+          <div className="grid grid-cols-1 gap-3">
+            {[
+              { roomType: "entire" as const, label: "Path A (Entire Home)" },
+              { roomType: "private" as const, label: "Path B (Private Room)" },
+            ].map(({ roomType, label }) => {
+              const model = ACTIVE_MODEL[roomType];
+              const spec = model.spec;
+              const accuracy = getModelAccuracy(roomType);
+              const weightsStr = spec.attributes
+                .map((attr) => {
+                  const w = spec.weights[attr] ?? 0;
+                  return `${w}×|${attr} diff|`;
+                })
+                .join(" - ");
+              const formula = `score = max(0, 100 - ${weightsStr} - ${spec.milesWeight}×miles)`;
+              const isSizeAdjusted = spec.adjustments !== null;
+              const typicalErrorPct = Math.round(accuracy.typicalError * 100);
+              const within20Pct = Math.round(accuracy.within20Pct * 100);
+              const rangeCoveragePct = Math.round(accuracy.rangeCoverage * 100);
+
+              return (
+                <div
+                  key={roomType}
+                  className="rounded-lg border border-slate-200 bg-slate-50 p-3 space-y-2 text-xs"
+                >
+                  <div className="flex items-center justify-between font-semibold text-slate-800">
+                    <span>
+                      {label} Model ({model.choice})
+                    </span>
+                    <span className="font-mono text-[11px] text-slate-500">
+                      {spec.compCount} comps · {spec.intervalScale}× range multiplier
+                    </span>
+                  </div>
+                  <div className="font-mono text-[11px] bg-white p-2 rounded border border-slate-200 text-slate-700 overflow-x-auto">
+                    {formula}
+                  </div>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-[11px] text-slate-600">
+                    <div>
+                      <span className="font-medium text-slate-700">Size-adjusted: </span>
+                      {isSizeAdjusted
+                        ? "Yes (line-item adjustments enabled)"
+                        : "No (selection only, unadjusted)"}
+                    </div>
+                    <div>
+                      <span className="font-medium text-slate-700">Comp count: </span>
+                      {spec.compCount} matches
+                    </div>
+                  </div>
+                  <div className="text-[11px] text-slate-500 pt-1 border-t border-slate-200">
+                    <span className="font-medium text-slate-700">Back-tested ({accuracy.fittedOn}): </span>
+                    typical error {typicalErrorPct}% · {within20Pct}% within 20% · {rangeCoveragePct}% range coverage ({accuracy.listingCount.toLocaleString()} DC listings)
+                  </div>
+                </div>
+              );
+            })}
+          </div>
 
           {[
             {
@@ -256,25 +314,36 @@ export const AuditDrawer: React.FC<AuditDrawerProps> = ({
                     key={c.id}
                     className="py-2 px-3 flex items-center justify-between gap-2"
                   >
-                    <div className="truncate">
-                      <span className="font-mono text-slate-400 mr-1.5">
+                    <div className="truncate flex items-center gap-1.5">
+                      <span className="font-mono text-slate-400">
                         #{idx + 1}
                       </span>
-                      <a
-                        href={`https://www.airbnb.com/rooms/${c.id}`}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="font-medium text-slate-900 hover:underline"
-                      >
-                        {c.name}
-                      </a>
-                      <span className="text-slate-400 font-mono text-[11px] ml-1.5">
+                      {c.isCustom && (
+                        <span className="px-1.5 py-0.5 rounded text-[10px] font-bold bg-blue-100 text-blue-700">
+                          Custom
+                        </span>
+                      )}
+                      {c.id.startsWith("custom-") ? (
+                        <span className="font-medium text-slate-900">
+                          {c.name}
+                        </span>
+                      ) : (
+                        <a
+                          href={`https://www.airbnb.com/rooms/${c.id}`}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="font-medium text-slate-900 hover:underline"
+                        >
+                          {c.name}
+                        </a>
+                      )}
+                      <span className="text-slate-400 font-mono text-[11px]">
                         (ID: {c.id})
                       </span>
                     </div>
                     <div className="font-mono tabular-nums text-slate-700 shrink-0">
                       Score {c.score.toFixed(1)} · ${Math.round(c.price)}/nt ·{" "}
-                      {Math.round(c.est_nights_ltm)} est. nts
+                      {c.isCustom ? "Nights: N/A" : `${Math.round(c.est_nights_ltm)} est. nts`}
                     </div>
                   </div>
                 ))}
@@ -283,10 +352,69 @@ export const AuditDrawer: React.FC<AuditDrawerProps> = ({
           ))}
         </div>
 
-        {/* 5. Adjustments Log */}
+        {/* 5. Custom Comparisons (Not in Dataset) */}
         <div className="space-y-2">
           <h3 className="text-sm font-bold text-slate-900">
-            5. Adjustments Log ({adjustmentsLog.length} entries)
+            5. Custom Comparisons ({customListings.length} added)
+          </h3>
+          {customListings.length === 0 ? (
+            <p className="text-xs text-slate-500">
+              No custom comparisons added from saved listing pages outside the dataset.
+            </p>
+          ) : (
+            <div className="border border-slate-200 rounded-lg divide-y divide-slate-100 text-xs bg-slate-50/50">
+              {customListings.map((c) => (
+                <div key={c.id} className="p-3 space-y-1.5">
+                  <div className="flex items-center justify-between gap-2">
+                    <div className="flex items-center gap-2 font-medium text-slate-900">
+                      <span className="px-1.5 py-0.5 rounded text-[10px] font-bold bg-blue-100 text-blue-700">
+                        Custom
+                      </span>
+                      <span>{c.name}</span>
+                      <span className="text-slate-400 font-mono text-[11px]">
+                        ({c.id})
+                      </span>
+                    </div>
+                    <span className="font-mono font-semibold text-slate-900">
+                      ${Math.round(c.price)}/night
+                    </span>
+                  </div>
+                  <div className="text-[11px] text-slate-600 flex flex-wrap gap-x-3 gap-y-1">
+                    <span>
+                      Type:{" "}
+                      <strong className="text-slate-800">
+                        {c.room_type === "entire" ? "Entire home" : "Private room"}
+                      </strong>
+                    </span>
+                    <span>
+                      Layout:{" "}
+                      <strong className="text-slate-800">
+                        {c.bedrooms} BR · {c.bathrooms} BA · {c.accommodates} guests
+                      </strong>
+                    </span>
+                    <span>
+                      Neighbourhood:{" "}
+                      <strong className="text-slate-800">{c.neighbourhood}</strong>
+                    </span>
+                  </div>
+                  {c.cityWarning && (
+                    <div className="text-[11px] text-amber-700 font-medium">
+                      ⚠️ {c.cityWarning}
+                    </div>
+                  )}
+                  <p className="text-[11px] text-slate-500 pt-0.5">
+                    Pinned into comparison set and counted toward the nightly-rate range. Guest demand (booked nights) is set to N/A so demand figures derive solely from official dataset records.
+                  </p>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+
+        {/* 6. Adjustments Log */}
+        <div className="space-y-2">
+          <h3 className="text-sm font-bold text-slate-900">
+            6. Adjustments Log ({adjustmentsLog.length} entries)
           </h3>
           {adjustmentsLog.length === 0 ? (
             <p className="text-xs text-slate-500">

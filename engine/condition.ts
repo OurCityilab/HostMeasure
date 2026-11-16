@@ -149,25 +149,8 @@ export function buildDeskReviewQueue(
     a.photoId.localeCompare(b.photoId)
   );
 
-  const queue: PropertyPhoto[] = [];
-  for (const room of ORDERED_PROPERTY_ROOMS) {
-    const roomPhotos = canonical.filter((p) => p.room === room);
-    if (roomPhotos.length > 0) {
-      const shuffledRoom = seededShuffle(roomPhotos, `${seed}::${room}`);
-      queue.push(...shuffledRoom);
-    }
-  }
-
-  // Pool untagged or other rooms (e.g. unclassified cover photos)
-  const otherPhotos = canonical.filter(
-    (p) => !ORDERED_PROPERTY_ROOMS.includes(p.room as PropertyRoomType)
-  );
-  if (otherPhotos.length > 0) {
-    const shuffledOther = seededShuffle(otherPhotos, `${seed}::untagged`);
-    queue.push(...shuffledOther);
-  }
-
-  return queue;
+  // Shuffle the whole pool with the seed, across properties, so subject photos are interleaved with comps
+  return seededShuffle(canonical, seed);
 }
 
 /**
@@ -283,6 +266,13 @@ export function summarizePropertyCondition(
 
   const activeScore = activeMethod === "desk" ? deskScore : aiScore;
 
+  const aiRatedCount = effectivePhotos.filter(
+    (p) => p.aiRating !== undefined
+  ).length;
+  const deskRatedCount = effectivePhotos.filter(
+    (p) => p.deskRating !== undefined
+  ).length;
+
   const methodDifference =
     aiScore !== null && deskScore !== null
       ? Math.round(Math.abs(deskScore - aiScore) * 10) / 10
@@ -294,6 +284,8 @@ export function summarizePropertyCondition(
   return {
     propertyId,
     photoCount: effectivePhotos.length,
+    aiRatedCount,
+    deskRatedCount,
     basis,
     aiScore,
     deskScore,

@@ -44,7 +44,7 @@ function MapClickHandler({ onSelectLocation }: MapClickHandlerProps) {
 
 export interface InteractiveMapProps {
   homePoint: Coordinates;
-  isCustomPin: boolean;
+  isCustomPin?: boolean;
   onSelectHomePoint?: (coords: Coordinates) => void;
   comps?: ScoredComp[];
   onExcludeCompClick?: (comp: ScoredComp) => void;
@@ -54,7 +54,7 @@ export interface InteractiveMapProps {
 
 export const InteractiveMap: React.FC<InteractiveMapProps> = ({
   homePoint,
-  isCustomPin,
+  isCustomPin = false,
   onSelectHomePoint,
   comps = [],
   onExcludeCompClick,
@@ -85,35 +85,60 @@ export const InteractiveMap: React.FC<InteractiveMapProps> = ({
           <CircleMarker
             key={comp.id}
             center={[comp.lat, comp.lon]}
-            radius={8}
+            radius={comp.isCustom ? 9 : 8}
             pathOptions={{
-              color: "#0f172a",
-              weight: 1.5,
-              fillColor: "#10b981",
-              fillOpacity: 0.85,
+              color: comp.isCustom ? "#1e40af" : "#0f172a",
+              weight: comp.isCustom ? 2 : 1.5,
+              fillColor: comp.isCustom ? "#2563eb" : "#10b981",
+              fillOpacity: 0.9,
             }}
           >
             <Popup>
               <div className="text-xs space-y-1.5 min-w-[200px] font-sans">
                 <div className="flex items-center justify-between gap-2 text-slate-500">
-                  <span>Rank #{idx + 1}</span>
-                  <span>·</span>
+                  <div className="flex items-center gap-1.5">
+                    <span>Rank #{idx + 1}</span>
+                    {comp.isCustom ? (
+                      <span className="px-1.5 py-0.5 rounded text-[10px] font-semibold bg-blue-100 text-blue-800 border border-blue-300">
+                        Custom
+                      </span>
+                    ) : comp.isPinned ? (
+                      <span className="px-1.5 py-0.5 rounded text-[10px] font-semibold bg-emerald-100 text-emerald-800 border border-emerald-300">
+                        Added by you
+                      </span>
+                    ) : null}
+                  </div>
                   <span className="font-mono font-semibold text-slate-900">
                     Score {Math.round(comp.score)}
                   </span>
                 </div>
-                <a
-                  href={`https://www.airbnb.com/rooms/${comp.id}`}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="font-semibold text-emerald-800 hover:underline block leading-snug"
-                >
-                  {comp.name} ↗
-                </a>
+                {comp.id.startsWith("custom-") ? (
+                  <span className="font-semibold text-slate-900 block leading-snug">
+                    {comp.name}
+                  </span>
+                ) : (
+                  <a
+                    href={`https://www.airbnb.com/rooms/${comp.id}`}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="font-semibold text-emerald-800 hover:underline block leading-snug"
+                  >
+                    {comp.name} ↗
+                  </a>
+                )}
                 <div className="font-mono text-slate-800">
-                  ${Math.round(comp.price)}/night · {Math.round(comp.est_nights_ltm)}{" "}
-                  est. nights/yr
+                  ${Math.round(comp.price)}/night ·{" "}
+                  {comp.isCustom ? (
+                    <span className="text-slate-500 font-sans">Nights: N/A</span>
+                  ) : (
+                    `${Math.round(comp.est_nights_ltm)} est. nights/yr`
+                  )}
                 </div>
+                {comp.cityWarning && (
+                  <div className="text-[11px] text-amber-800 font-medium">
+                    ⚠ {comp.cityWarning}
+                  </div>
+                )}
                 <div className="text-slate-600">{comp.whyChosen}</div>
                 {onExcludeCompClick && (
                   <button

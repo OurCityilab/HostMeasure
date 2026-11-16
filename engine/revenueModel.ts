@@ -177,7 +177,9 @@ export function calculatePathFinancials(params: {
     : DC_RULES.hostedShortTermRental.annualNightCap;
   const effectiveLegalCapForMath = legalCapNights ?? 365;
 
-  const nightlyRate = computeRangeFromValues(comps.map((c) => c.price));
+  const nightlyRate =
+    compSelection.conditionAdjustedNightlyRate ??
+    computeRangeFromValues(comps.map((c) => c.price));
   const unadjustedNightlyRate =
     compSelection.unadjustedNightlyRate ??
     computeRangeFromValues(comps.map((c) => c.rawPrice ?? c.price));
@@ -186,8 +188,10 @@ export function calculatePathFinancials(params: {
     expected: nightlyRate.expected - unadjustedNightlyRate.expected,
     high: nightlyRate.high - unadjustedNightlyRate.high,
   };
+  const datasetComps = comps.filter((c) => !c.isCustom);
+  const demandSource = datasetComps.length > 0 ? datasetComps : comps;
   const demandNights = computeRangeFromValues(
-    comps.map((c) => c.est_nights_ltm)
+    demandSource.map((c) => c.est_nights_ltm)
   );
 
   const ownerAvail = Math.max(0, Math.min(365, home.nightsAvailable));

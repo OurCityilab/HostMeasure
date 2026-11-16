@@ -10,6 +10,8 @@ import {
   PropertyRoomType,
   ScoredComp,
 } from "../../types";
+import { AMENITIES_LIST, AmenityDefinition } from "../../config/amenities";
+import { parsePastedAmenities } from "../../engine/amenities";
 import { InteractiveMap } from "./InteractiveMap";
 import { PdfDropZone } from "./PdfDropZone";
 import { PdfReviewCard } from "./PdfReviewCard";
@@ -28,6 +30,10 @@ interface Step1MyHomeProps {
   onRemovePhoto: (photoId: string) => void;
   datasetListings: Listing[];
   onApplyPdfHome: (parsed: ParsedPdfListing) => void;
+  ownerAmenities: string[];
+  onChangeOwnerAmenities: (amenities: string[]) => void;
+  amenitiesBanner?: string | null;
+  onDismissAmenitiesBanner?: () => void;
 }
 
 export const Step1MyHome: React.FC<Step1MyHomeProps> = ({
@@ -43,9 +49,35 @@ export const Step1MyHome: React.FC<Step1MyHomeProps> = ({
   onRemovePhoto,
   datasetListings,
   onApplyPdfHome,
+  ownerAmenities,
+  onChangeOwnerAmenities,
+  amenitiesBanner,
+  onDismissAmenitiesBanner,
 }) => {
   const [pendingCard, setPendingCard] = useState<ParsedPdfListing | null>(null);
   const [showManualPhotos, setShowManualPhotos] = useState<boolean>(false);
+  const [pasteInput, setPasteInput] = useState<string>("");
+  const [pasteFeedback, setPasteFeedback] = useState<string | null>(null);
+
+  const handleProcessPastedText = (text: string) => {
+    const foundCodes = parsePastedAmenities(text);
+    if (foundCodes.length > 0) {
+      const merged = Array.from(new Set([...ownerAmenities, ...foundCodes]));
+      onChangeOwnerAmenities(merged);
+      setPasteFeedback(`Found ${foundCodes.length} amenities`);
+      setPasteInput("");
+    } else {
+      setPasteFeedback("No matching amenities found in pasted text");
+    }
+  };
+
+  const handleToggleAmenity = (code: string) => {
+    if (ownerAmenities.includes(code)) {
+      onChangeOwnerAmenities(ownerAmenities.filter((c) => c !== code));
+    } else {
+      onChangeOwnerAmenities([...ownerAmenities, code]);
+    }
+  };
   return (
     <section
       id="step-1"
@@ -240,6 +272,128 @@ export const Step1MyHome: React.FC<Step1MyHomeProps> = ({
 
           <p className="text-xs text-slate-500">
             Optional: Click anywhere on the map to drop a pin on your exact block. Dark green shows your home; smaller green markers show the 15 closest comparable homes.
+          </p>
+        </div>
+      </div>
+
+      {/* Card: What your home offers */}
+      <div className="mt-8 pt-6 border-t border-slate-200 space-y-5">
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+          <div>
+            <h3 className="text-base font-bold text-slate-900">
+              What your home offers
+            </h3>
+            <p className="text-xs text-slate-500 mt-0.5">
+              Tick what your home provides. We compare these against your 15 matches in Step 3 to highlight gaps and advantages.
+            </p>
+          </div>
+          <div className="flex items-center gap-3 shrink-0 text-xs">
+            <span className="font-mono text-slate-500 font-medium">
+              {ownerAmenities.length} of {AMENITIES_LIST.length} selected
+            </span>
+            <span className="text-slate-300">·</span>
+            <button
+              type="button"
+              onClick={() => onChangeOwnerAmenities(AMENITIES_LIST.map((a: AmenityDefinition) => a.code))}
+              className="text-emerald-800 hover:text-emerald-950 font-medium cursor-pointer"
+            >
+              Select all
+            </button>
+            <span className="text-slate-300">·</span>
+            <button
+              type="button"
+              onClick={() => onChangeOwnerAmenities([])}
+              className="text-slate-600 hover:text-slate-900 font-medium cursor-pointer"
+            >
+              Clear
+            </button>
+          </div>
+        </div>
+
+        {/* Pre-fill Banner from matched PDF listing */}
+        {amenitiesBanner && (
+          <div className="rounded-lg bg-emerald-50 border border-emerald-200 p-3.5 flex items-center justify-between gap-3 text-xs text-emerald-900 font-medium">
+            <div className="flex items-center gap-2">
+              <span className="w-2 h-2 rounded-full bg-emerald-600 shrink-0" />
+              <span>{amenitiesBanner}</span>
+            </div>
+            {onDismissAmenitiesBanner && (
+              <button
+                type="button"
+                onClick={onDismissAmenitiesBanner}
+                className="text-emerald-700 hover:text-emerald-950 font-semibold cursor-pointer shrink-0"
+              >
+                Dismiss
+              </button>
+            )}
+          </div>
+        )}
+
+        {/* 20-Amenity Checklist */}
+        <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-5 gap-2.5">
+          {AMENITIES_LIST.map((item: AmenityDefinition) => {
+            const checked = ownerAmenities.includes(item.code);
+            return (
+              <label
+                key={item.code}
+                className={`flex items-center gap-2.5 p-2.5 rounded-lg border text-xs cursor-pointer transition-colors select-none ${
+                  checked
+                    ? "border-emerald-800 bg-emerald-50/70 text-emerald-950 font-medium shadow-xs"
+                    : "border-slate-200 bg-white text-slate-700 hover:bg-slate-50 hover:border-slate-300"
+                }`}
+              >
+                <input
+                  type="checkbox"
+                  checked={checked}
+                  onChange={() => handleToggleAmenity(item.code)}
+                  className="rounded border-slate-300 text-emerald-800 focus:ring-emerald-800/30 h-4 w-4 shrink-0"
+                />
+                <span className="truncate">{item.label}</span>
+              </label>
+            );
+          })}
+        </div>
+
+        {/* Paste Helper */}
+        <div className="rounded-lg border border-slate-200 bg-slate-50/80 p-4 space-y-2.5">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+            <label
+              htmlFor="amenity-paste-box"
+              className="text-xs font-semibold text-slate-800"
+            >
+              Or paste the amenities list from the listing&apos;s &ldquo;What this place offers&rdquo; window.
+            </label>
+            {pasteFeedback && (
+              <span className="text-xs font-semibold text-emerald-800 bg-emerald-100/70 px-2.5 py-0.5 rounded-full inline-block">
+                {pasteFeedback}
+              </span>
+            )}
+          </div>
+          <div className="flex gap-2">
+            <textarea
+              id="amenity-paste-box"
+              value={pasteInput}
+              onChange={(e) => setPasteInput(e.target.value)}
+              onPaste={(e) => {
+                const text = e.clipboardData.getData("text");
+                handleProcessPastedText(text);
+              }}
+              placeholder="Paste copied text here (e.g. from Airbnb modal). Any recognized amenities will be checked automatically..."
+              rows={2}
+              className="flex-1 rounded-lg border border-slate-300 bg-white p-2.5 text-xs text-slate-900 placeholder:text-slate-400 focus:border-emerald-800 focus:outline-none focus:ring-2 focus:ring-emerald-800/20"
+            />
+            {pasteInput.trim() && (
+              <button
+                type="button"
+                onClick={() => handleProcessPastedText(pasteInput)}
+                className="px-3 py-2 text-xs font-semibold text-white bg-emerald-900 hover:bg-emerald-800 rounded-lg cursor-pointer shrink-0 transition-colors"
+              >
+                Parse
+              </button>
+            )}
+          </div>
+          <p className="text-[11px] text-slate-500">
+            Filters out lines starting with &ldquo;unavailable&rdquo; and ignores anything after &ldquo;not included&rdquo;.
           </p>
         </div>
       </div>

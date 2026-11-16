@@ -6,12 +6,12 @@ import { Coordinates, LicenseStatus, Listing, RoomType } from "../types";
  * Exact 5 sample rows provided in the specification, used ONLY as a fallback
  * when DATA_URL is still the placeholder or fails to load, and for unit tests.
  */
-export const SAMPLE_CSV_FALLBACK = `id,name,neighbourhood,lat,lon,room_type,bedrooms,beds,bathrooms,accommodates,price,minimum_nights,availability_365,reviews_ltm,review_score,est_nights_ltm,license_status,is_superhost,host_listing_count,picture_url
-16487475,Cozy Guest Basement Suite w/ Private Entrance,"Brightwood Park, Crestwood, Petworth",38.957,-77.0326,entire,0,1,1.0,2,99,2,338,39,4.8,234,hosted,0,1,https://a0.muscache.com/pictures/miso/Hosting-16487475/original/sample.jpg
-804615687377958782,Luxurious Condo in the Heart of Washington DC,"Shaw, Logan Circle",38.9116,-77.0195,entire,2,2,1.0,6,320,1,356,16,4.55,96,hosted,0,3,https://a0.muscache.com/pictures/miso/Hosting-804615687377958782/original/sample.jpg
-840874289101839772,Private Studio by Metro Station - Travel Nurs,"Capitol View, Marshall Heights, Benning Heights",38.8913,-76.9361,entire,0,1,1.0,2,147,3,348,15,4.88,90,hosted,1,1,https://a0.muscache.com/pictures/miso/Hosting-840874289101839772/original/sample.jpg
-52953748,Vintage Home Washington DC Washer/Dryer | Kin,"Capitol View, Marshall Heights, Benning Heights",38.8837,-76.942,entire,4,4,2.0,8,200,1,357,48,4.67,255,hosted,0,6,https://a0.muscache.com/pictures/miso/Hosting-52953748/original/sample.jpg
-617541021718007683,Spacious Woodley Park Flat,"Cleveland Park, Woodley Park, Massachusetts Avenue Heights, Woodland-Normanstone Terrace",38.9248,-77.0513,entire,1,3,1.0,4,150,5,189,23,4.94,230,hosted,1,1,https://a0.muscache.com/pictures/miso/Hosting-617541021718007683/original/sample.jpg`;
+export const SAMPLE_CSV_FALLBACK = `id,name,neighbourhood,lat,lon,room_type,bedrooms,beds,bathrooms,accommodates,price,minimum_nights,availability_365,reviews_ltm,review_score,est_nights_ltm,license_status,is_superhost,host_listing_count,picture_url,amenities
+16487475,Cozy Guest Basement Suite w/ Private Entrance,"Brightwood Park, Crestwood, Petworth",38.957,-77.0326,entire,0,1,1.0,2,99,2,338,39,4.8,234,hosted,0,1,https://a0.muscache.com/pictures/miso/Hosting-16487475/original/sample.jpg,wifi|kitchen|ac|washer|dryer|tv|dishwasher|self_checkin
+804615687377958782,Luxurious Condo in the Heart of Washington DC,"Shaw, Logan Circle",38.9116,-77.0195,entire,2,2,1.0,6,320,1,356,16,4.55,96,hosted,0,3,https://a0.muscache.com/pictures/miso/Hosting-804615687377958782/original/sample.jpg,wifi|kitchen|ac|washer|dryer|tv|patio|parking
+840874289101839772,Private Studio by Metro Station - Travel Nurs,"Capitol View, Marshall Heights, Benning Heights",38.8913,-76.9361,entire,0,1,1.0,2,147,3,348,15,4.88,90,hosted,1,1,https://a0.muscache.com/pictures/miso/Hosting-840874289101839772/original/sample.jpg,wifi|ac|tv|self_checkin
+52953748,Vintage Home Washington DC Washer/Dryer | Kin,"Capitol View, Marshall Heights, Benning Heights",38.8837,-76.942,entire,4,4,2.0,8,200,1,357,48,4.67,255,hosted,0,6,https://a0.muscache.com/pictures/miso/Hosting-52953748/original/sample.jpg,wifi|kitchen|ac|washer|dryer|tv|dishwasher|backyard
+617541021718007683,Spacious Woodley Park Flat,"Cleveland Park, Woodley Park, Massachusetts Avenue Heights, Woodland-Normanstone Terrace",38.9248,-77.0513,entire,1,3,1.0,4,150,5,189,23,4.94,230,hosted,1,1,https://a0.muscache.com/pictures/miso/Hosting-617541021718007683/original/sample.jpg,wifi|kitchen|ac|washer|dryer|tv|dishwasher|self_checkin|patio`;
 
 /**
  * Fallback reference centroids used ONLY when the 5-row sample fallback is active
@@ -88,9 +88,30 @@ function parseRequiredInt(val: string | undefined, fallback = 0): number {
   return Number.isFinite(num) ? num : fallback;
 }
 
+export const REQUIRED_CSV_COLUMNS = [
+  "id",
+  "neighbourhood",
+  "lat",
+  "lon",
+  "room_type",
+  "bedrooms",
+  "accommodates",
+  "price",
+  "est_nights_ltm",
+  "license_status",
+] as const;
+
+export function validateListingCsvColumns(fields: string[] | undefined): void {
+  const fieldSet = new Set((fields ?? []).map((f) => f.trim()));
+  const missing = REQUIRED_CSV_COLUMNS.filter((col) => !fieldSet.has(col));
+  if (missing.length > 0) {
+    throw new Error(`This file is missing: ${missing.join(", ")}`);
+  }
+}
+
 /**
  * Parse raw CSV string using PapaParse with header: true, dynamicTyping: false,
- * converting numeric columns manually and keeping `id` strictly as a string.
+ * validating required columns, converting numeric columns manually, and keeping `id` strictly as a string.
  */
 export function parseListingsCsv(csvText: string): Listing[] {
   const result = Papa.parse<Record<string, string>>(csvText.trim(), {
@@ -98,6 +119,8 @@ export function parseListingsCsv(csvText: string): Listing[] {
     dynamicTyping: false,
     skipEmptyLines: true,
   });
+
+  validateListingCsvColumns(result.meta.fields);
 
   const listings: Listing[] = [];
 
@@ -132,6 +155,13 @@ export function parseListingsCsv(csvText: string): Listing[] {
       superhostRaw === "1" || superhostRaw === "true" || superhostRaw === "t" ? 1 : 0;
     const host_listing_count = Math.max(1, parseRequiredInt(row.host_listing_count, 1));
     const picture_url = parsePictureUrl(row.picture_url);
+    const rawAmenities = row.amenities !== undefined ? String(row.amenities).trim() : "";
+    const amenities = rawAmenities
+      ? rawAmenities
+          .split("|")
+          .map((s) => s.trim().toLowerCase())
+          .filter(Boolean)
+      : [];
 
     listings.push({
       id,
@@ -154,6 +184,7 @@ export function parseListingsCsv(csvText: string): Listing[] {
       is_superhost,
       host_listing_count,
       picture_url,
+      amenities,
     });
   }
 
@@ -204,7 +235,7 @@ export async function loadInitialListings(customUrl?: string): Promise<DataLoadO
     return {
       listings: sampleListings,
       isFallbackSample: true,
-      sourceLabel: `Sample fallback (${sampleListings.length} listings)`,
+      sourceLabel: "sample fallback",
       warningMessage:
         'DATA_URL in /config/dataSource.ts is currently set to the placeholder ("PASTE_RAW_CSV_URL_HERE"). Showing the 5 built-in sample rows so you can test the interface. Upload the 3,271-row Inside Airbnb CSV below to run full DC market numbers.',
     };
@@ -223,7 +254,7 @@ export async function loadInitialListings(customUrl?: string): Promise<DataLoadO
     return {
       listings: parsed,
       isFallbackSample: false,
-      sourceLabel: `Inside Airbnb DC snapshot (${parsed.length.toLocaleString()} listings)`,
+      sourceLabel: targetUrl,
       warningMessage: null,
     };
   } catch (err) {
@@ -232,8 +263,8 @@ export async function loadInitialListings(customUrl?: string): Promise<DataLoadO
     return {
       listings: sampleListings,
       isFallbackSample: true,
-      sourceLabel: `Sample fallback (${sampleListings.length} listings)`,
-      warningMessage: `Could not fetch market CSV from ${targetUrl} (${reason}). Using the 5 built-in fallback rows. Upload the listings CSV file below to analyze all 3,271 DC listings.`,
+      sourceLabel: "sample fallback",
+      warningMessage: `Could not fetch market CSV from ${targetUrl} (${reason}). Using the 5 built-in fallback rows. Upload the listings CSV file to analyze all 3,271 DC listings.`,
     };
   }
 }

@@ -399,14 +399,22 @@ async function parseSinglePdf(
 /**
  * Parse property facts from extracted text (fallback for unmatched listings).
  */
+/**
+ * Parse property facts from extracted text (fallback for unmatched listings).
+ */
 export function parseFactsFromText(text: string): {
   roomType: RoomType;
   bedrooms: number;
   bathrooms: number;
-  guests: number;
+  guests: number | null;
   city: string;
   isDc: boolean;
-  quotedPrice: number | null;
+  quotedPriceInfo: {
+    total: number;
+    nights: number;
+    perNight: number;
+    label: string;
+  } | null;
 } {
   // Room type
   let roomType: RoomType = "entire";
@@ -438,9 +446,9 @@ export function parseFactsFromText(text: string): {
     bathrooms = parseFloat(bathMatch[1]);
   }
 
-  // Guests
-  let guests = 2;
-  const guestMatch = text.match(/(\d+)\s*guest/i);
+  // Guests: /(\d+)\s+guests?/ (if not found, leave blank, never a default like 99)
+  let guests: number | null = null;
+  const guestMatch = text.match(/(\d+)\s+guests?/i);
   if (guestMatch) {
     guests = parseInt(guestMatch[1], 10);
   }
@@ -449,11 +457,30 @@ export function parseFactsFromText(text: string): {
   const isDc = /(?:washington|district\s+of\s+columbia|\bdc\b)/i.test(text);
   const city = isDc ? "Washington, DC" : "Unknown Location";
 
-  // Quoted price
-  let quotedPrice: number | null = null;
-  const priceMatch = text.match(/\$(\d{1,4})\s*(?:night|\/night)/i);
-  if (priceMatch) {
-    quotedPrice = parseInt(priceMatch[1], 10);
+  // Quoted price: /\$([\d,]+)\s+for\s+(\d+)\s+nights?/
+  // (if several, the last): show "Quoted $X for N nights" and compute per night as X / N. If not found, show nothing.
+  let quotedPriceInfo: {
+    total: number;
+    nights: number;
+    perNight: number;
+    label: string;
+  } | null = null;
+
+  const priceMatches = Array.from(text.matchAll(/\$([\d,]+)\s+for\s+(\d+)\s+nights?/gi));
+  if (priceMatches.length > 0) {
+    const lastMatch = priceMatches[priceMatches.length - 1];
+    const totalStr = lastMatch[1];
+    const total = parseFloat(totalStr.replace(/,/g, ""));
+    const nights = parseInt(lastMatch[2], 10);
+    if (nights > 0 && Number.isFinite(total)) {
+      const perNight = total / nights;
+      quotedPriceInfo = {
+        total,
+        nights,
+        perNight,
+        label: `Quoted $${totalStr} for ${nights} night${nights === 1 ? "" : "s"}`,
+      };
+    }
   }
 
   return {
@@ -463,7 +490,7 @@ export function parseFactsFromText(text: string): {
     guests,
     city,
     isDc,
-    quotedPrice,
+    quotedPriceInfo,
   };
 }
 
@@ -522,6 +549,17 @@ function deduplicateAndFinalizePhotos(
   return photos;
 }
 
+export function normalizeTitleForGrouping(fileName: string): string {
+  const base = fileName.replace(/\.pdf$/i, "");
+  const upToDash = base.includes(" - ") ? base.split(" - ")[0] : base;
+  return upToDash.toLowerCase().replace(/[^a-z0-9]/g, "");
+}
+
+export function getDisplayTitleFromFileName(fileName: string): string {
+  const base = fileName.replace(/\.pdf$/i, "");
+  return (base.includes(" - ") ? base.split(" - ")[0] : base).trim();
+}
+
 /**
  * Primary entry point: Extracts listings and photos from one or more dropped Airbnb listing PDFs.
  * Merges multiple PDFs for the same listing (e.g. listing page + photo tour page).
@@ -538,109 +576,144 @@ export async function extractPdfData(
     singlePdfs.push(parsed);
   }
 
-  // Group PDFs by matched listing ID or normalized title
-  const groups: Array<{
-    listingId: string | null;
-    title: string;
+  // 1. Group files by normalized listing title FIRST (file name up to " - ", lowercase, letters and digits only)
+  interface IntermediateGroup {
+    titleKey: string;
+    displayTitle: string;
+    listingIds: Set<string>;
     combinedText: string;
     images: RawExtractedImage[];
     fileNames: string[];
-    matchedListing: Listing | null;
-    matchType: "id" | "title" | "none";
-  }> = [];
+  }
+
+  const groups: IntermediateGroup[] = [];
 
   for (const pdfItem of singlePdfs) {
-    let matchedListing: Listing | null = null;
-    let matchType: "id" | "title" | "none" = "none";
-
-    // 1. Try matching by listing ID
-    if (pdfItem.listingId) {
-      const found = datasetListings.find((l) => l.id === pdfItem.listingId);
-      if (found) {
-        matchedListing = found;
-        matchType = "id";
-      }
-    }
-
-    // 2. If no ID match, try matching by title
-    if (!matchedListing && pdfItem.titleFromFile) {
-      const normFile = normalizeString(pdfItem.titleFromFile);
-      if (normFile.length >= 6) {
-        const matches = datasetListings.filter((l) => {
-          const normData = normalizeString(l.name);
-          return normData.startsWith(normFile) || (normFile.length >= 10 && normFile.startsWith(normData));
-        });
-        if (matches.length === 1) {
-          matchedListing = matches[0];
-          matchType = "title";
-        }
-      }
-    }
-
-    const resolvedId = matchedListing ? matchedListing.id : pdfItem.listingId;
-    const resolvedTitle = matchedListing ? matchedListing.name : pdfItem.titleFromFile;
-    const groupKey = resolvedId || normalizeString(resolvedTitle);
-
-    const existingGroup = groups.find((g) => {
-      const gKey = g.matchedListing?.id || g.listingId || normalizeString(g.title);
-      return gKey === groupKey;
-    });
-
-    if (existingGroup) {
-      existingGroup.combinedText += " " + pdfItem.rawText;
-      existingGroup.images.push(...pdfItem.images);
-      existingGroup.fileNames.push(pdfItem.fileName);
-      if (!existingGroup.matchedListing && matchedListing) {
-        existingGroup.matchedListing = matchedListing;
-        existingGroup.matchType = matchType;
-        existingGroup.listingId = resolvedId;
-        existingGroup.title = resolvedTitle;
+    const titleKey = normalizeTitleForGrouping(pdfItem.fileName);
+    const existing = groups.find((g) => g.titleKey === titleKey);
+    if (existing) {
+      existing.combinedText += " " + pdfItem.rawText;
+      existing.images.push(...pdfItem.images);
+      existing.fileNames.push(pdfItem.fileName);
+      if (pdfItem.listingId) {
+        existing.listingIds.add(pdfItem.listingId);
       }
     } else {
+      const listingIds = new Set<string>();
+      if (pdfItem.listingId) {
+        listingIds.add(pdfItem.listingId);
+      }
       groups.push({
-        listingId: resolvedId,
-        title: resolvedTitle,
+        titleKey,
+        displayTitle: getDisplayTitleFromFileName(pdfItem.fileName),
+        listingIds,
         combinedText: pdfItem.rawText,
         images: [...pdfItem.images],
         fileNames: [pdfItem.fileName],
-        matchedListing,
-        matchType,
       });
     }
   }
 
-  // Build ParsedPdfListing results
+  // 2. Then merge any group that shares a listing ID
+  let merged = true;
+  while (merged) {
+    merged = false;
+    for (let i = 0; i < groups.length; i++) {
+      for (let j = i + 1; j < groups.length; j++) {
+        const g1 = groups[i];
+        const g2 = groups[j];
+        const hasSharedId = Array.from(g1.listingIds).some((id) => id && g2.listingIds.has(id));
+        if (hasSharedId) {
+          g2.listingIds.forEach((id) => g1.listingIds.add(id));
+          g1.fileNames.push(...g2.fileNames);
+          g1.combinedText += " " + g2.combinedText;
+          g1.images.push(...g2.images);
+          groups.splice(j, 1);
+          merged = true;
+          break;
+        }
+      }
+      if (merged) break;
+    }
+  }
+
+  // 3. Match against dataset and build ParsedPdfListing results
   const results: ParsedPdfListing[] = [];
 
   for (const group of groups) {
-    const facts = parseFactsFromText(group.combinedText);
-    const matched = group.matchedListing;
+    let matchedListing: Listing | null = null;
+    let matchType: "id" | "title" | "none" = "none";
+    let matchStatusMessage = "";
 
-    const propertyIdForPhotos = matched ? matched.id : "subject";
+    const candidateId = Array.from(group.listingIds).find(Boolean) || null;
+
+    // 1. Try matching by listing ID (as string)
+    if (candidateId) {
+      const found = datasetListings.find((l) => String(l.id) === String(candidateId));
+      if (found) {
+        matchedListing = found;
+        matchType = "id";
+        matchStatusMessage = "Matched by listing ID";
+      }
+    }
+
+    // 2. If no ID match, try matching by title
+    if (!matchedListing && group.displayTitle) {
+      const normTitle = group.displayTitle.toLowerCase().replace(/[^a-z0-9]/g, "");
+      if (normTitle.length >= 6) {
+        const matches = datasetListings.filter((l) => {
+          const normData = l.name.toLowerCase().replace(/[^a-z0-9]/g, "");
+          return normData.startsWith(normTitle) || (normTitle.length >= 10 && normTitle.startsWith(normData));
+        });
+        if (matches.length === 1) {
+          matchedListing = matches[0];
+          matchType = "title";
+          matchStatusMessage = "Matched by title";
+        }
+      }
+    }
+
+    // 3. If no match
+    if (!matchedListing) {
+      matchType = "none";
+      const displayId = candidateId || "none";
+      matchStatusMessage = `No listing with ID ${displayId} or this title in the loaded data (${datasetListings.length.toLocaleString()} rows)`;
+    }
+
+    const facts = parseFactsFromText(group.combinedText);
+    const propertyIdForPhotos = matchedListing ? matchedListing.id : "subject";
     const deduplicatedPhotos = deduplicateAndFinalizePhotos(group.images, propertyIdForPhotos);
 
-    const title = matched ? matched.name : group.title;
-    const roomType = matched ? matched.room_type : facts.roomType;
-    const bedrooms = matched ? matched.bedrooms : facts.bedrooms;
-    const bathrooms = matched && matched.bathrooms !== null ? matched.bathrooms : facts.bathrooms;
-    const guests = matched ? matched.accommodates : facts.guests;
-    const city = matched ? "Washington, DC" : facts.city;
-
-    const cityWarning = !matched && !facts.isDc ? "This listing may not be in Washington, DC" : undefined;
+    const title = matchedListing ? matchedListing.name : group.displayTitle;
+    const roomType = matchedListing ? matchedListing.room_type : facts.roomType;
+    const bedrooms = matchedListing ? matchedListing.bedrooms : facts.bedrooms;
+    const bathrooms =
+      matchedListing && matchedListing.bathrooms !== null
+        ? matchedListing.bathrooms
+        : facts.bathrooms;
+    const guests =
+      matchedListing && matchedListing.accommodates !== undefined
+        ? matchedListing.accommodates
+        : facts.guests;
+    const city = matchedListing ? "Washington, DC" : facts.city;
+    const cityWarning =
+      !matchedListing && !facts.isDc ? "This listing may not be in Washington, DC" : undefined;
 
     results.push({
-      listingId: matched ? matched.id : group.listingId,
+      listingId: matchedListing ? matchedListing.id : candidateId,
       title,
       roomType,
       bedrooms,
       bathrooms,
       guests,
       city,
-      quotedPrice: facts.quotedPrice,
+      quotedPrice: facts.quotedPriceInfo ? Math.round(facts.quotedPriceInfo.perNight) : null,
+      quotedPriceInfo: facts.quotedPriceInfo,
       photos: deduplicatedPhotos,
-      isInDataset: matched !== null,
-      matchedListing: matched,
-      matchType: group.matchType,
+      isInDataset: matchedListing !== null,
+      matchedListing,
+      matchType,
+      matchStatusMessage,
       fileNames: group.fileNames,
       cityWarning,
     });

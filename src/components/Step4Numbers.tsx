@@ -20,14 +20,17 @@ import {
   Sparkles,
 } from "lucide-react";
 import { DC_RULES } from "../../config/dcRules";
+import { getModelAccuracy } from "../../config/model";
 import { buildDeterministicExplanation } from "../../engine/revenueModel";
 import {
+  CompSelectionResult,
   CostAssumptions,
   DualPathComparison,
   EligibilityEvaluation,
   HomeProfile,
   PathFinancials,
 } from "../../types";
+import { amenityGaps, categorizeAmenityGaps } from "../../engine/amenities";
 
 interface Step4NumbersProps {
   home: HomeProfile;
@@ -37,6 +40,8 @@ interface Step4NumbersProps {
   onChangeAssumptions: (updated: Partial<CostAssumptions>) => void;
   onResetAssumptions: () => void;
   onOpenAuditDrawer: () => void;
+  ownerAmenities?: string[];
+  compSelectionA?: CompSelectionResult;
 }
 
 function formatUsd(val: number): string {
@@ -55,6 +60,8 @@ export const Step4Numbers: React.FC<Step4NumbersProps> = ({
   onChangeAssumptions,
   onResetAssumptions,
   onOpenAuditDrawer,
+  ownerAmenities = [],
+  compSelectionA,
 }) => {
   const [tornadoPath, setTornadoPath] = useState<"pathA" | "pathB">("pathA");
   const [explanationText, setExplanationText] = useState<string | null>(null);
@@ -182,14 +189,26 @@ export const Step4Numbers: React.FC<Step4NumbersProps> = ({
   };
 
   const buildPlainTextSummary = (): string => {
+    const gapsA = compSelectionA
+      ? amenityGaps(ownerAmenities, compSelectionA.comps)
+      : [];
+    const catA = categorizeAmenityGaps(gapsA);
+    const missingAmenitiesText =
+      catA.missingFromHome.length > 0
+        ? catA.missingFromHome
+            .map((item) => `${item.label} (${item.compCount} of ${item.compTotal})`)
+            .join(", ")
+        : "None";
+
     const lines = [
       `HostMeasure DC — Summary for ${home.neighbourhood}`,
       `Home Profile: ${home.bedrooms} BR, ${home.bathrooms} BA, sleeps ${home.guests}, ${home.nightsAvailable} nights/yr available`,
       `Eligibility: ${eligibility.headline} (${DC_RULES.disclaimerText}, verified ${DC_RULES.lastVerified})`,
       `Verdict: ${comparison.verdictSummary}`,
+      `Common in your matches but missing from your home: ${missingAmenitiesText}`,
       ``,
       `PATH A: ${pathA.pathTitle} (${pathA.compCount} comparable homes)`,
-      `  Nightly Rate Range (P25 / Median / P75): ${formatUsd(pathA.nightlyRate.low)} / ${formatUsd(pathA.nightlyRate.expected)} / ${formatUsd(pathA.nightlyRate.high)}`,
+      `  Nightly Rate Range (Low / Median / High): ${formatUsd(pathA.nightlyRate.low)} / ${formatUsd(pathA.nightlyRate.expected)} / ${formatUsd(pathA.nightlyRate.high)}`,
       `  Estimated Demand Range: ${Math.round(pathA.demandNights.low)} / ${Math.round(pathA.demandNights.expected)} / ${Math.round(pathA.demandNights.high)} nights`,
       `  Bookable Nights: ${Math.round(pathA.bookableNights.low)} / ${Math.round(pathA.bookableNights.expected)} / ${Math.round(pathA.bookableNights.high)} (${pathA.bindingLimitLabel})`,
       `  Gross Income: ${formatUsd(pathA.grossIncome.low)} (conservative) | ${formatUsd(pathA.grossIncome.expected)} (expected) | ${formatUsd(pathA.grossIncome.high)} (optimistic)`,
@@ -199,7 +218,7 @@ export const Step4Numbers: React.FC<Step4NumbersProps> = ({
       `  Break-Even: ${Math.round(pathA.breakEvenNights.expected)} nights/year`,
       ``,
       `PATH B: ${pathB.pathTitle} (${pathB.compCount} comparable homes)`,
-      `  Nightly Rate Range (P25 / Median / P75): ${formatUsd(pathB.nightlyRate.low)} / ${formatUsd(pathB.nightlyRate.expected)} / ${formatUsd(pathB.nightlyRate.high)}`,
+      `  Nightly Rate Range (Low / Median / High): ${formatUsd(pathB.nightlyRate.low)} / ${formatUsd(pathB.nightlyRate.expected)} / ${formatUsd(pathB.nightlyRate.high)}`,
       `  Estimated Demand Range: ${Math.round(pathB.demandNights.low)} / ${Math.round(pathB.demandNights.expected)} / ${Math.round(pathB.demandNights.high)} nights`,
       `  Bookable Nights: ${Math.round(pathB.bookableNights.low)} / ${Math.round(pathB.bookableNights.expected)} / ${Math.round(pathB.bookableNights.high)} (${pathB.bindingLimitLabel})`,
       `  Gross Income: ${formatUsd(pathB.grossIncome.low)} (conservative) | ${formatUsd(pathB.grossIncome.expected)} (expected) | ${formatUsd(pathB.grossIncome.high)} (optimistic)`,
@@ -290,6 +309,10 @@ export const Step4Numbers: React.FC<Step4NumbersProps> = ({
       (path.effectiveLegalCapForMath / maxBarNights) * 100
     );
 
+    const accuracy = getModelAccuracy(path.roomType);
+    const typicalErrorPct = Math.round(accuracy.typicalError * 100);
+    const rangeCoveragePct = Math.round(accuracy.rangeCoverage * 100);
+
     return (
       <div
         key={path.pathId}
@@ -319,14 +342,14 @@ export const Step4Numbers: React.FC<Step4NumbersProps> = ({
             <p className="text-xs text-slate-600 mt-0.5">{path.pathSubtitle}</p>
           </div>
 
-          {/* 1. Nightly Rate Range Bar (P25 / Median / P75) */}
+          {/* 1. Nightly Rate Range Bar (Low / Median / High) */}
           <div className="space-y-2">
             <div className="flex items-baseline justify-between">
               <span className="text-xs font-semibold text-slate-700">
                 Nightly Rate Range ({path.compCount} homes)
               </span>
               <span className="text-xs font-mono tabular-nums text-slate-600">
-                P25{" "}
+                Low{" "}
                 <strong className="text-slate-900">
                   ${Math.round(path.nightlyRate.low)}
                 </strong>{" "}
@@ -334,7 +357,7 @@ export const Step4Numbers: React.FC<Step4NumbersProps> = ({
                 <strong className="text-emerald-900 text-sm">
                   ${Math.round(path.nightlyRate.expected)}
                 </strong>{" "}
-                · P75{" "}
+                · High{" "}
                 <strong className="text-slate-900">
                   ${Math.round(path.nightlyRate.high)}
                 </strong>
@@ -357,9 +380,14 @@ export const Step4Numbers: React.FC<Step4NumbersProps> = ({
               />
             </div>
             <div className="flex justify-between text-[11px] font-mono tabular-nums text-slate-500">
-              <span>Conservative (P25): ${Math.round(path.nightlyRate.low)}</span>
+              <span>Conservative (Low): ${Math.round(path.nightlyRate.low)}</span>
               <span>Median: ${Math.round(path.nightlyRate.expected)}</span>
-              <span>Optimistic (P75): ${Math.round(path.nightlyRate.high)}</span>
+              <span>Optimistic (High): ${Math.round(path.nightlyRate.high)}</span>
+            </div>
+
+            {/* Reliability Note */}
+            <div className="p-2.5 rounded-lg bg-slate-50 border border-slate-200 text-[11px] text-slate-600 leading-relaxed">
+              <span className="font-semibold text-slate-800">How reliable is this?</span> Tested on {accuracy.listingCount} DC listings by hiding each one and predicting its rate from its matches, the median estimate was typically off by {typicalErrorPct}%, and the low-high range held the real rate {rangeCoveragePct}% of the time. Size and location do not capture finish, condition or amenities.
             </div>
 
             {Math.abs(path.conditionRateEffect.expected) >= 0.5 ? (
@@ -401,11 +429,11 @@ export const Step4Numbers: React.FC<Step4NumbersProps> = ({
               Estimated Market Demand (LTM)
             </span>
             <span className="font-mono tabular-nums text-slate-800">
-              P25 <strong>{Math.round(path.demandNights.low)}</strong> · Median{" "}
+              Low <strong>{Math.round(path.demandNights.low)}</strong> · Median{" "}
               <strong className="text-emerald-900">
                 {Math.round(path.demandNights.expected)}
               </strong>{" "}
-              · P75 <strong>{Math.round(path.demandNights.high)}</strong>{" "}
+              · High <strong>{Math.round(path.demandNights.high)}</strong>{" "}
               <span className="text-slate-500 font-sans">estimated nights</span>
             </span>
           </div>
@@ -531,7 +559,7 @@ export const Step4Numbers: React.FC<Step4NumbersProps> = ({
                   {formatUsd(path.grossIncome.low)}
                 </div>
                 <div className="text-[10px] font-mono tabular-nums text-slate-400">
-                  P25 × {Math.round(path.bookableNights.low)}n
+                  Low × {Math.round(path.bookableNights.low)}n
                 </div>
               </div>
               <div className="p-2.5 rounded-lg bg-white border border-slate-300">
@@ -551,7 +579,7 @@ export const Step4Numbers: React.FC<Step4NumbersProps> = ({
                   {formatUsd(path.grossIncome.high)}
                 </div>
                 <div className="text-[10px] font-mono tabular-nums text-slate-400">
-                  P75 × {Math.round(path.bookableNights.high)}n
+                  High × {Math.round(path.bookableNights.high)}n
                 </div>
               </div>
             </div>

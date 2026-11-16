@@ -188,6 +188,7 @@ export const PropertyPhotoIntake: React.FC<PropertyPhotoIntakeProps> = ({
           photoId,
           propertyId,
           room: defaultUploadRoom,
+          manuallyTagged: true,
           dataUrl: processed.dataUrl,
           mimeType: processed.mimeType,
           base64Data: processed.base64Data,
@@ -451,16 +452,18 @@ export interface ConditionEvaluationWorkspaceProps {
   onApplyAiRating: (
     photoId: string,
     rating: {
-      score: ConditionScoreValue;
+      score: ConditionScoreValue | null;
+      isNa?: boolean;
       confidence: AiConfidence;
       observations: string[];
       ratedAt: string;
       room?: PropertyRoomType;
     }
   ) => void;
+  onClearAllAiRatings?: () => void;
   onApplyDeskRating: (
     photoId: string,
-    score: ConditionScoreValue,
+    score: ConditionScoreValue | null,
     ratedAt: string
   ) => void;
   onLogDeskReviewStart: (seed: string) => void;
@@ -492,6 +495,7 @@ export const ConditionEvaluationWorkspace: React.FC<
   onAddPhotos,
   onMarkPhotoUnavailable,
   onApplyAiRating,
+  onClearAllAiRatings,
   onApplyDeskRating,
   onLogDeskReviewStart,
   onDeskReviewCompleted,
@@ -508,6 +512,7 @@ export const ConditionEvaluationWorkspace: React.FC<
   const [aiErrorBanner, setAiErrorBanner] = useState<string | null>(null);
   const [aiProgressCount, setAiProgressCount] = useState<number>(0);
   const [aiTotalToRate, setAiTotalToRate] = useState<number>(0);
+  const [isConfirmingReRate, setIsConfirmingReRate] = useState<boolean>(false);
 
   // Desk review state
   const [shuffleSeed, setShuffleSeed] = useState<string>(() =>
@@ -519,6 +524,7 @@ export const ConditionEvaluationWorkspace: React.FC<
   const [deskQueueIds, setDeskQueueIds] = useState<string[]>([]);
   const [deskIndex, setDeskIndex] = useState<number>(0);
   const [deskImageLoadError, setDeskImageLoadError] = useState<boolean>(false);
+  const [deskBlindWarning, setDeskBlindWarning] = useState<boolean>(false);
 
   const getPropertyDisplayName = (propertyId: string): string => {
     if (propertyId === "subject") return "Your Subject Home";
@@ -528,13 +534,20 @@ export const ConditionEvaluationWorkspace: React.FC<
 
   // Available photos (excluding unavailable)
   const availablePhotos = allPhotos.filter((p) => !p.unavailable);
-  const coverPhotosCount = availablePhotos.filter(
-    (p) => p.source === "cover"
+  const loadedCoverPhotos = allPhotos.filter(
+    (p) => p.source === "cover" && !p.unavailable
   ).length;
+  const failedCoverPhotos = allPhotos.filter(
+    (p) => p.source === "cover" && p.unavailable
+  ).length;
+  const remainingAiPhotos = availablePhotos.filter(
+    (p) => p.aiRating === undefined
+  );
+  const uniqueHomes = new Set(availablePhotos.map((p) => p.propertyId)).size;
 
   // Add cover photos of matches
-  const handleAddMatchesCoverPhotos = async () => {
-    if (!currentComps || currentComps.length === 0) return;
+  const handleAddMatchesCoverPhotos = async (): Promise<PropertyPhoto[]> => {
+    if (!currentComps || currentComps.length === 0) return [];
     setIsAddingCovers(true);
 
     const existingCoverPropIds = new Set(
@@ -550,7 +563,7 @@ export const ConditionEvaluationWorkspace: React.FC<
 
     if (compsToAdd.length === 0) {
       setIsAddingCovers(false);
-      return;
+      return [];
     }
 
     const newPhotos: PropertyPhoto[] = [];
@@ -575,6 +588,7 @@ export const ConditionEvaluationWorkspace: React.FC<
           base64Data: "",
           source: "cover",
           unavailable: false,
+          manuallyTagged: false,
           uploadedAt: new Date().toISOString(),
         });
       } else {
@@ -587,6 +601,7 @@ export const ConditionEvaluationWorkspace: React.FC<
           base64Data: "",
           source: "cover",
           unavailable: true,
+          manuallyTagged: false,
           uploadedAt: new Date().toISOString(),
         });
 
@@ -603,13 +618,14 @@ export const ConditionEvaluationWorkspace: React.FC<
     }
     setIsAddingCovers(false);
     setCoverAddProgress("");
+    return newPhotos;
   };
 
-  // Method 1: Run AI analysis with max 3 concurrent requests
-  const handleRunAiAnalysis = async () => {
-    const candidates = allPhotos.filter(
-      (p) => !p.unavailable && p.aiRating === undefined
-    );
+  // Method 1: Run AI analysis one photo at a time with a 1 second pause between calls
+  const handleRunAiAnalysis = async (customCandidates?: PropertyPhoto[]) => {
+    const candidates =
+      customCandidates ??
+      allPhotos.filter((p) => !p.unavailable && p.aiRating === undefined);
     if (candidates.length === 0) return;
 
     setAiErrorBanner(null);
@@ -617,148 +633,230 @@ export const ConditionEvaluationWorkspace: React.FC<
     setAiProgressCount(0);
     setAiTotalToRate(candidates.length);
 
-    let completedCount = 0;
-    const CONCURRENCY = 3;
-    let nextIdx = 0;
+    let completedInRun = 0;
+    const initialRatedCount = allPhotos.filter(
+      (p) => !p.unavailable && p.aiRating !== undefined
+    ).length;
+    const totalPool = availablePhotos.length;
 
     try {
-      const worker = async () => {
-        while (nextIdx < candidates.length) {
-          const idx = nextIdx++;
-          const photo = candidates[idx];
+      for (let i = 0; i < candidates.length; i++) {
+        // 1 second pause between calls (starting before the 2nd call)
+        if (i > 0) {
+          await new Promise((r) => setTimeout(r, 1000));
+        }
 
-          try {
-            if (photo.source === "cover") {
-              const res = await fetch("/api/rate-cover-photo", {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({
-                  photoId: photo.photoId,
-                  url: photo.dataUrl,
-                }),
-              });
+        const photo = candidates[i];
+        setAiProgressCount(i + 1);
 
-              if (res.status === 503) {
-                throw new Error("AI analysis unavailable. Use Desk review.");
+        try {
+          if (photo.source === "cover") {
+            const res = await fetch("/api/rate-cover-photo", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                photoId: photo.photoId,
+                url: photo.dataUrl,
+              }),
+            });
+
+            const data = await res.json().catch(() => ({}));
+
+            if (!res.ok) {
+              const currentRatedCount = initialRatedCount + completedInRun;
+              let failMsg = `Rated ${currentRatedCount} of ${totalPool}. ${
+                data.error || "AI analysis failed."
+              }`;
+
+              if (data.reason === "rate_limit") {
+                failMsg = `Rated ${currentRatedCount} of ${totalPool}. Gemini's rate limit was reached. Wait a minute, then resume.`;
+              } else if (data.reason === "quota_exhausted") {
+                failMsg = `Rated ${currentRatedCount} of ${totalPool}. The Gemini quota is used up.`;
+              } else if (data.reason === "invalid_key") {
+                failMsg = `Rated ${currentRatedCount} of ${totalPool}. Invalid Gemini API key.`;
               }
 
-              if (!res.ok) {
-                const errData = await res.json().catch(() => ({}));
-                const errReason = errData.error || `HTTP ${res.status}`;
+              setAiErrorBanner(failMsg);
+              const comp = listings.find((l) => l.id === photo.propertyId);
+              onLogCustomAdjustment?.({
+                listingId: photo.propertyId,
+                listingName: comp?.name ?? photo.propertyId,
+                reason: `Cover photo rating paused: ${data.error || "Rate limit"}`,
+              });
+              break;
+            }
+
+            // Success
+            if (data.isNa || data.score === null || data.room === "Other") {
+              onApplyAiRating(photo.photoId, {
+                score: null,
+                isNa: true,
+                confidence: data.confidence ?? "low",
+                observations: Array.isArray(data.observations)
+                  ? data.observations
+                  : [],
+                ratedAt: new Date().toISOString(),
+                room: "Other",
+              });
+              const comp = listings.find((l) => l.id === photo.propertyId);
+              onLogCustomAdjustment?.({
+                listingId: photo.propertyId,
+                listingName: comp?.name ?? photo.propertyId,
+                reason: `Cover photo rated by AI: N/A (Other / not a room)`,
+              });
+            } else {
+              const intScore = Math.round(
+                Number(data.score)
+              ) as ConditionScoreValue;
+              if (
+                Number.isFinite(intScore) &&
+                intScore >= 1 &&
+                intScore <= 6
+              ) {
+                onApplyAiRating(photo.photoId, {
+                  score: intScore,
+                  isNa: false,
+                  confidence: data.confidence ?? "low",
+                  observations: Array.isArray(data.observations)
+                    ? data.observations
+                    : [],
+                  ratedAt: new Date().toISOString(),
+                  room: data.room,
+                });
                 const comp = listings.find((l) => l.id === photo.propertyId);
                 onLogCustomAdjustment?.({
                   listingId: photo.propertyId,
                   listingName: comp?.name ?? photo.propertyId,
-                  reason: `Cover photo rating failed for "${
-                    comp?.name ?? photo.propertyId
-                  }": ${errReason}`,
+                  reason: `Cover photo rated by AI: ${intScore}/6 (${data.room})`,
                 });
-              } else {
-                const data = await res.json();
-                const intScore = Math.round(
-                  Number(data.score)
-                ) as ConditionScoreValue;
-                if (
-                  Number.isFinite(intScore) &&
-                  intScore >= 1 &&
-                  intScore <= 6
-                ) {
-                  onApplyAiRating(photo.photoId, {
-                    score: intScore,
-                    confidence: data.confidence ?? "low",
-                    observations: Array.isArray(data.observations)
-                      ? data.observations
-                      : [],
-                    ratedAt: new Date().toISOString(),
-                    room: data.room,
-                  });
-                  const comp = listings.find((l) => l.id === photo.propertyId);
-                  onLogCustomAdjustment?.({
-                    listingId: photo.propertyId,
-                    listingName: comp?.name ?? photo.propertyId,
-                    reason: `Cover photo rated by AI: ${intScore}/6 (${data.room})`,
-                  });
-                }
               }
-            } else {
-              // Uploaded photo
-              const res = await fetch("/api/analyze-single-photo", {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({
-                  photoId: photo.photoId,
-                  room: photo.room,
-                  mimeType: photo.mimeType,
-                  data: photo.base64Data,
-                }),
-              });
+            }
+            completedInRun++;
+          } else {
+            // Uploaded / PDF photo
+            const res = await fetch("/api/analyze-single-photo", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                photoId: photo.photoId,
+                room: photo.room,
+                mimeType: photo.mimeType,
+                data: photo.base64Data,
+              }),
+            });
 
-              if (!res.ok) {
-                throw new Error("AI analysis unavailable. Use Desk review.");
+            const data = await res.json().catch(() => ({}));
+
+            if (!res.ok) {
+              const currentRatedCount = initialRatedCount + completedInRun;
+              let failMsg = `Rated ${currentRatedCount} of ${totalPool}. ${
+                data.error || "AI analysis failed."
+              }`;
+
+              if (data.reason === "rate_limit") {
+                failMsg = `Rated ${currentRatedCount} of ${totalPool}. Gemini's rate limit was reached. Wait a minute, then resume.`;
+              } else if (data.reason === "quota_exhausted") {
+                failMsg = `Rated ${currentRatedCount} of ${totalPool}. The Gemini quota is used up.`;
+              } else if (data.reason === "invalid_key") {
+                failMsg = `Rated ${currentRatedCount} of ${totalPool}. Invalid Gemini API key.`;
               }
 
-              const data = await res.json();
-              const intScore = Math.round(
-                Number(data.score)
-              ) as ConditionScoreValue;
-              if (!Number.isFinite(intScore) || intScore < 1 || intScore > 6) {
-                throw new Error("AI analysis unavailable. Use Desk review.");
-              }
+              setAiErrorBanner(failMsg);
+              break;
+            }
 
+            // Success
+            if (data.isNa || data.score === null || data.room === "Other") {
               onApplyAiRating(photo.photoId, {
-                score: intScore,
+                score: null,
+                isNa: true,
                 confidence: data.confidence ?? "medium",
                 observations: Array.isArray(data.observations)
                   ? data.observations
                   : [],
                 ratedAt: new Date().toISOString(),
-              });
-            }
-          } catch (err) {
-            if (photo.source === "cover") {
-              if (
-                err instanceof Error &&
-                err.message.includes("AI analysis unavailable")
-              ) {
-                throw err;
-              }
-              const comp = listings.find((l) => l.id === photo.propertyId);
-              onLogCustomAdjustment?.({
-                listingId: photo.propertyId,
-                listingName: comp?.name ?? photo.propertyId,
-                reason: `Cover photo evaluation error: ${
-                  err instanceof Error ? err.message : "Network error"
-                }`,
+                room: "Other",
               });
             } else {
-              throw err;
+              const intScore = Math.round(
+                Number(data.score)
+              ) as ConditionScoreValue;
+              onApplyAiRating(photo.photoId, {
+                score: intScore,
+                isNa: false,
+                confidence: data.confidence ?? "medium",
+                observations: Array.isArray(data.observations)
+                  ? data.observations
+                  : [],
+                ratedAt: new Date().toISOString(),
+                room: data.room,
+              });
             }
-          } finally {
-            completedCount++;
-            setAiProgressCount(completedCount);
+            completedInRun++;
           }
+        } catch (err) {
+          const currentRatedCount = initialRatedCount + completedInRun;
+          setAiErrorBanner(
+            `Rated ${currentRatedCount} of ${totalPool}. Network error communicating with server.`
+          );
+          break;
         }
-      };
-
-      await Promise.all(
-        Array.from(
-          { length: Math.min(CONCURRENCY, candidates.length) },
-          () => worker()
-        )
-      );
-    } catch {
-      setAiErrorBanner("AI analysis unavailable. Use Desk review.");
+      }
     } finally {
       setIsRunningAi(false);
     }
   };
 
+  const handleConfirmReRate = () => {
+    setIsConfirmingReRate(false);
+    setAiErrorBanner(null);
+    onClearAllAiRatings?.();
+    const allAvailable = allPhotos
+      .filter((p) => !p.unavailable)
+      .map((p) => ({ ...p, aiRating: undefined }));
+    handleRunAiAnalysis(allAvailable);
+  };
+
   // Method 2: Start blind Desk Review
-  const handleStartDeskReview = () => {
-    if (availablePhotos.length === 0) return;
+  const handleStartDeskReview = async (overrideBlindCheck = false) => {
+    setDeskBlindWarning(false);
+    let currentPool = allPhotos.filter((p) => !p.unavailable);
+
+    // 1. First add cover photo of each of the current 15 matches if not already there
+    const existingCoverPropIds = new Set(
+      allPhotos
+        .filter((p) => p.source === "cover")
+        .map((p) => p.propertyId)
+    );
+    const missingCoverComps = currentComps.filter(
+      (c) => c.picture_url && !existingCoverPropIds.has(c.id)
+    );
+
+    if (missingCoverComps.length > 0) {
+      const added = await handleAddMatchesCoverPhotos();
+      const validAdded = added.filter((p) => !p.unavailable);
+      currentPool = [...currentPool, ...validAdded];
+    }
+
+    // 2. If pool holds photos from fewer than 3 different properties, do not start
+    const poolUniqueHomes = new Set(currentPool.map((p) => p.propertyId)).size;
+    if (!overrideBlindCheck && poolUniqueHomes < 3) {
+      setDeskBlindWarning(true);
+      return;
+    }
+
+    if (overrideBlindCheck && poolUniqueHomes < 3) {
+      onLogCustomAdjustment?.({
+        listingId: "desk-review-not-blind",
+        listingName: "Desk Review Notice",
+        reason: "Desk review started with a single-property pool (not blind)",
+      });
+    }
+
+    if (currentPool.length === 0) return;
     const cleanSeed = shuffleSeed.trim() || generateDeskReviewSeed();
     setShuffleSeed(cleanSeed);
-    const orderedPhotos = buildDeskReviewQueue(availablePhotos, cleanSeed);
+    const orderedPhotos = buildDeskReviewQueue(currentPool, cleanSeed);
     setDeskQueueIds(orderedPhotos.map((p) => p.photoId));
     setDeskIndex(0);
     setDeskImageLoadError(false);
@@ -771,7 +869,7 @@ export const ConditionEvaluationWorkspace: React.FC<
     (p) => p.photoId === currentDeskPhotoId
   );
 
-  const handleSelectDeskScore = (score: ConditionScoreValue) => {
+  const handleSelectDeskScore = (score: ConditionScoreValue | null) => {
     if (!currentDeskPhoto) return;
     onApplyDeskRating(
       currentDeskPhoto.photoId,
@@ -848,13 +946,23 @@ export const ConditionEvaluationWorkspace: React.FC<
       <div className="rounded-xl border border-slate-200 bg-slate-50/70 p-5 space-y-3">
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
           <div className="space-y-1">
-            <div className="flex items-center gap-2">
+            <div className="flex flex-wrap items-center gap-2">
               <span className="text-xs font-semibold uppercase tracking-wider text-emerald-900">
                 Listing Cover Photos
               </span>
               <span className="text-slate-400">·</span>
-              <span className="text-xs text-slate-600 font-mono">
-                {coverPhotosCount} loaded
+              <span className="text-xs text-slate-700 font-mono font-medium">
+                {loadedCoverPhotos} {loadedCoverPhotos === 1 ? "photo" : "photos"} added
+              </span>
+              <span className="text-slate-400">·</span>
+              <span
+                className={`text-xs font-mono px-1.5 py-0.5 rounded ${
+                  failedCoverPhotos > 0
+                    ? "bg-amber-100 text-amber-900 font-semibold"
+                    : "text-slate-500"
+                }`}
+              >
+                {failedCoverPhotos} failed to load
               </span>
             </div>
             <p className="text-xs text-slate-600 max-w-xl">
@@ -951,7 +1059,7 @@ export const ConditionEvaluationWorkspace: React.FC<
                 : "border-transparent text-slate-600 hover:text-slate-900"
             }`}
           >
-            Desk review ({availablePhotos.length} photos in pool)
+            Desk review ({availablePhotos.length} photos from {uniqueHomes} {uniqueHomes === 1 ? "home" : "homes"})
           </button>
         </div>
 
@@ -962,19 +1070,61 @@ export const ConditionEvaluationWorkspace: React.FC<
               <p className="text-xs text-slate-600 max-w-2xl">
                 Sends each photo separately to Gemini at temperature 0 with the six anchors above. Scores only fixed elements (cabinets, counters, floors, fixtures, walls, windows, roof, siding) and never sends address, price, or whether a photo belongs to your home or a comp.
               </p>
-              <button
-                type="button"
-                disabled={isRunningAi || availablePhotos.length === 0}
-                onClick={handleRunAiAnalysis}
-                className="inline-flex items-center gap-2 px-4 py-2.5 text-xs font-semibold text-white bg-emerald-900 hover:bg-emerald-800 rounded-lg transition-colors cursor-pointer whitespace-nowrap shrink-0 disabled:opacity-50"
-              >
-                <Sparkles className="w-4 h-4" />
-                {isRunningAi
-                  ? `Scoring photo ${aiProgressCount} of ${aiTotalToRate}...`
-                  : `Run AI analysis (${availablePhotos.length} photo${
-                      availablePhotos.length === 1 ? "" : "s"
-                    })`}
-              </button>
+              <div className="flex flex-wrap items-center gap-3 shrink-0">
+                {isConfirmingReRate ? (
+                  <div className="inline-flex items-center gap-2 p-2 bg-amber-50 border border-amber-200 rounded-lg text-xs">
+                    <span className="text-amber-900 font-medium">
+                      Re-rate all {availablePhotos.length} photos?
+                    </span>
+                    <button
+                      type="button"
+                      disabled={isRunningAi}
+                      onClick={handleConfirmReRate}
+                      className="px-2.5 py-1 bg-amber-700 hover:bg-amber-800 text-white rounded font-semibold cursor-pointer disabled:opacity-50"
+                    >
+                      Yes, re-rate all
+                    </button>
+                    <button
+                      type="button"
+                      disabled={isRunningAi}
+                      onClick={() => setIsConfirmingReRate(false)}
+                      className="px-2 py-1 text-slate-700 hover:text-slate-900 cursor-pointer"
+                    >
+                      Cancel
+                    </button>
+                  </div>
+                ) : (
+                  <>
+                    <button
+                      type="button"
+                      disabled={
+                        isRunningAi ||
+                        remainingAiPhotos.length === 0 ||
+                        availablePhotos.length === 0
+                      }
+                      onClick={() => handleRunAiAnalysis()}
+                      className="inline-flex items-center gap-2 px-4 py-2.5 text-xs font-semibold text-white bg-emerald-900 hover:bg-emerald-800 rounded-lg transition-colors cursor-pointer whitespace-nowrap shrink-0 disabled:opacity-50"
+                    >
+                      <Sparkles className="w-4 h-4" />
+                      {isRunningAi
+                        ? `Scoring photo ${aiProgressCount} of ${aiTotalToRate}...`
+                        : remainingAiPhotos.length === 0 && availablePhotos.length > 0
+                        ? `All photos rated (${availablePhotos.length})`
+                        : `Rate remaining photos (${remainingAiPhotos.length})`}
+                    </button>
+                    {availablePhotos.length > 0 && (
+                      <button
+                        type="button"
+                        disabled={isRunningAi}
+                        onClick={() => setIsConfirmingReRate(true)}
+                        className="text-xs text-slate-600 hover:text-emerald-900 underline underline-offset-2 cursor-pointer disabled:opacity-50"
+                      >
+                        Re-rate all
+                      </button>
+                    )}
+                  </>
+                )}
+              </div>
             </div>
 
             {aiErrorBanner && (
@@ -1011,36 +1161,50 @@ export const ConditionEvaluationWorkspace: React.FC<
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-200">
-                    {availablePhotos.map((p) => (
-                      <tr key={p.photoId}>
-                        <td className="py-2.5 px-3 font-mono font-semibold text-slate-900">
-                          {p.photoId}
-                        </td>
-                        <td className="py-2.5 px-3 text-slate-600">
-                          <span
-                            className={`px-1.5 py-0.5 rounded text-[10px] font-medium ${
-                              p.source === "cover"
-                                ? "bg-slate-100 text-slate-700"
-                                : "bg-emerald-50 text-emerald-800"
-                            }`}
-                          >
-                            {p.source === "cover" ? "Cover photo" : "Upload"}
-                          </span>
-                        </td>
-                        <td className="py-2.5 px-3 text-slate-700">{p.room}</td>
-                        <td className="py-2.5 px-3 text-right font-mono tabular-nums font-bold text-emerald-900">
-                          {p.aiRating ? p.aiRating.score : "Not rated"}
-                        </td>
-                        <td className="py-2.5 px-3 capitalize text-slate-600">
-                          {p.aiRating ? p.aiRating.confidence : "—"}
-                        </td>
-                        <td className="py-2.5 px-3 text-slate-600">
-                          {p.aiRating
-                            ? p.aiRating.observations.join(" · ")
-                            : "Click 'Run AI analysis' to evaluate"}
-                        </td>
-                      </tr>
-                    ))}
+                    {availablePhotos.map((p) => {
+                      const isOtherOrNa =
+                        p.aiRating &&
+                        (p.aiRating.isNa ||
+                          p.aiRating.score === null ||
+                          p.aiRating.room === "Other");
+
+                      return (
+                        <tr key={p.photoId}>
+                          <td className="py-2.5 px-3 font-mono font-semibold text-slate-900">
+                            {p.photoId}
+                          </td>
+                          <td className="py-2.5 px-3 text-slate-600">
+                            <span
+                              className={`px-1.5 py-0.5 rounded text-[10px] font-medium ${
+                                p.source === "cover"
+                                  ? "bg-slate-100 text-slate-700"
+                                  : "bg-emerald-50 text-emerald-800"
+                              }`}
+                            >
+                              {p.source === "cover" ? "Cover photo" : "Upload"}
+                            </span>
+                          </td>
+                          <td className="py-2.5 px-3 text-slate-700">
+                            {isOtherOrNa ? "N/A" : p.room}
+                          </td>
+                          <td className="py-2.5 px-3 text-right font-mono tabular-nums font-bold text-emerald-900">
+                            {p.aiRating
+                              ? isOtherOrNa
+                                ? "N/A"
+                                : p.aiRating.score
+                              : "Not rated"}
+                          </td>
+                          <td className="py-2.5 px-3 capitalize text-slate-600">
+                            {p.aiRating ? p.aiRating.confidence : "—"}
+                          </td>
+                          <td className="py-2.5 px-3 text-slate-600">
+                            {p.aiRating
+                              ? p.aiRating.observations.join(" · ")
+                              : "Click 'Run AI analysis' to evaluate"}
+                          </td>
+                        </tr>
+                      );
+                    })}
                   </tbody>
                 </table>
               </div>
@@ -1059,15 +1223,46 @@ export const ConditionEvaluationWorkspace: React.FC<
               <div className="rounded-xl border border-slate-200 bg-slate-50/70 p-6 space-y-5">
                 <div className="space-y-2">
                   <div className="text-xs font-semibold text-emerald-800">
-                    Blind Photo Shuffle · Grouped by Room Type
+                    Blind Photo Shuffle · Mixed Properties
                   </div>
                   <h4 className="text-lg font-bold text-slate-900">
                     Best done by someone who has not seen these homes. Hand the screen to your reviewer.
                   </h4>
                   <p className="text-xs text-slate-600 leading-relaxed max-w-2xl">
-                    All {availablePhotos.length} available photos across your home and comparable properties will be pooled, grouped by room type (so kitchens are rated against kitchens), and shuffled using the seed below. Only the photo, its random ID, the room type, and the 1–6 scale anchors are shown during rating.
+                    All {availablePhotos.length} available photos from {uniqueHomes} {uniqueHomes === 1 ? "home" : "homes"} across your home and comparable properties will be pooled and shuffled using the seed below. Only the photo, its random ID, the room type, and the 1–6 scale anchors are shown during rating.
                   </p>
                 </div>
+
+                {deskBlindWarning && (
+                  <div className="rounded-xl border border-amber-300 bg-amber-50 p-4 space-y-3">
+                    <div className="flex items-start gap-2.5 text-xs text-amber-950 font-semibold">
+                      <AlertTriangle className="w-4 h-4 text-amber-700 shrink-0 mt-0.5" />
+                      <span>
+                        A blind review needs photos from your home and at least two comparison homes. Add comparison photos first.
+                      </span>
+                    </div>
+                    <div className="flex flex-wrap items-center gap-3 pl-6.5">
+                      <button
+                        type="button"
+                        disabled={isAddingCovers || currentComps.length === 0}
+                        onClick={handleAddMatchesCoverPhotos}
+                        className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-white bg-emerald-900 hover:bg-emerald-800 rounded-lg transition-colors cursor-pointer disabled:opacity-50"
+                      >
+                        <Camera className="w-3.5 h-3.5" />
+                        {isAddingCovers
+                          ? `Checking photos (${coverAddProgress})...`
+                          : `Add cover photos of my ${currentComps.length} matches`}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => handleStartDeskReview(true)}
+                        className="text-xs text-slate-600 hover:text-slate-900 underline cursor-pointer"
+                      >
+                        Start anyway (not blind)
+                      </button>
+                    </div>
+                  </div>
+                )}
 
                 <div className="flex flex-wrap items-center gap-3">
                   <div className="flex items-center gap-2 text-xs">
@@ -1096,11 +1291,11 @@ export const ConditionEvaluationWorkspace: React.FC<
 
                   <button
                     type="button"
-                    onClick={handleStartDeskReview}
+                    onClick={() => handleStartDeskReview(false)}
                     className="inline-flex items-center gap-2 px-5 py-2.5 text-xs font-semibold text-white bg-emerald-900 hover:bg-emerald-800 rounded-lg transition-colors cursor-pointer whitespace-nowrap shrink-0"
                   >
                     <Play className="w-3.5 h-3.5 fill-current" />
-                    Start desk review ({availablePhotos.length} photos)
+                    Start desk review ({availablePhotos.length} photos from {uniqueHomes} {uniqueHomes === 1 ? "home" : "homes"})
                   </button>
                 </div>
               </div>
@@ -1144,7 +1339,7 @@ export const ConditionEvaluationWorkspace: React.FC<
                   </div>
                 </div>
 
-                {/* Blind Photo Viewport + 1-6 Anchor Buttons */}
+                {/* Blind Photo Viewport + 1-6 Anchor Buttons + 7th N/A Button */}
                 <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
                   <div className="lg:col-span-7 rounded-xl overflow-hidden border border-slate-200 bg-slate-950 flex items-center justify-center min-h-[300px] max-h-[420px] p-2">
                     {deskImageLoadError ? (
@@ -1213,6 +1408,31 @@ export const ConditionEvaluationWorkspace: React.FC<
                         </button>
                       );
                     })}
+
+                    {/* Seventh button: N/A */}
+                    {(() => {
+                      const isNaSelected =
+                        currentDeskPhoto.deskRating?.isNa === true ||
+                        currentDeskPhoto.deskRating?.score === null;
+                      return (
+                        <button
+                          type="button"
+                          onClick={() => handleSelectDeskScore(null)}
+                          className={`w-full text-left p-3 rounded-lg border text-xs transition-colors cursor-pointer flex items-start gap-2.5 ${
+                            isNaSelected
+                              ? "border-emerald-800 bg-emerald-900 text-white font-semibold"
+                              : "border-slate-200 bg-slate-50/70 hover:bg-emerald-50/60 hover:border-emerald-700 text-slate-800"
+                          }`}
+                        >
+                          <span className="font-mono font-bold text-sm shrink-0">
+                            N/A
+                          </span>
+                          <span className="leading-snug">
+                            · not a room (view, street, map, amenity)
+                          </span>
+                        </button>
+                      );
+                    })()}
                   </div>
                 </div>
               </div>
@@ -1251,6 +1471,10 @@ export const ConditionEvaluationWorkspace: React.FC<
                       {deskQueueIds.map((pid) => {
                         const photo = allPhotos.find((p) => p.photoId === pid);
                         if (!photo) return null;
+                        const isNaDesk =
+                          photo.deskRating?.score === null ||
+                          photo.deskRating?.isNa === true;
+
                         return (
                           <tr key={photo.photoId}>
                             <td className="py-2.5 px-3.5 font-mono font-semibold text-slate-900">
@@ -1263,7 +1487,11 @@ export const ConditionEvaluationWorkspace: React.FC<
                               {photo.room}
                             </td>
                             <td className="py-2.5 px-3.5 text-right font-mono tabular-nums font-bold text-emerald-900">
-                              {photo.deskRating ? photo.deskRating.score : "—"}
+                              {photo.deskRating
+                                ? isNaDesk
+                                  ? "N/A"
+                                  : photo.deskRating.score
+                                : "—"}
                             </td>
                           </tr>
                         );
@@ -1331,15 +1559,37 @@ export const ConditionEvaluationWorkspace: React.FC<
                     </td>
                     <td className="py-2.5 px-3 text-right font-mono tabular-nums text-slate-800">
                       {s.deskScore !== null
-                        ? s.deskScore.toFixed(1)
+                        ? `${s.deskScore.toFixed(1)}${
+                            s.photoCount > 0
+                              ? ` (${s.deskRatedCount} of ${s.photoCount} photos)`
+                              : ""
+                          }`
+                        : s.photoCount > 0
+                        ? `Not rated (0 of ${s.photoCount} photos)`
                         : "Not rated"}
                     </td>
                     <td className="py-2.5 px-3 text-right font-mono tabular-nums text-slate-800">
-                      {s.aiScore !== null ? s.aiScore.toFixed(1) : "Not rated"}
+                      {s.aiScore !== null
+                        ? `${s.aiScore.toFixed(1)}${
+                            s.photoCount > 0
+                              ? ` (${s.aiRatedCount} of ${s.photoCount} photos)`
+                              : ""
+                          }`
+                        : s.photoCount > 0
+                        ? `Not rated (0 of ${s.photoCount} photos)`
+                        : "Not rated"}
                     </td>
                     <td className="py-2.5 px-3 text-right font-mono tabular-nums font-bold text-emerald-900">
                       {s.activeScore !== null
-                        ? s.activeScore.toFixed(1)
+                        ? `${s.activeScore.toFixed(1)}${
+                            s.photoCount > 0
+                              ? ` (${
+                                  activeScoringMethod === "ai"
+                                    ? s.aiRatedCount
+                                    : s.deskRatedCount
+                                } of ${s.photoCount} photos)`
+                              : ""
+                          }`
                         : "Not rated"}
                     </td>
                     <td className="py-2.5 px-3.5">

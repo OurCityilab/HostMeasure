@@ -1,4 +1,5 @@
 import { DEFAULT_CONDITION_RATE_PER_POINT } from "../config/assumptions";
+import { ACTIVE_MODEL } from "../config/model";
 import { getNeighbourhoodCentroid } from "../data/listings";
 import {
   AdjustmentLogEntry,
@@ -17,13 +18,22 @@ import {
   calculateAdjustedCompPrice,
   summarizePropertyCondition,
 } from "./condition";
+import { listingToComparable, targetToSubject } from "./listingAdapter";
+import {
+  adjustComparable,
+  distanceMiles,
+  estimateRange,
+  ModelSpec,
+  percentile,
+  similarity,
+} from "./valuation";
 
 export const TOP_COMP_COUNT = 15;
 export const THIN_MARKET_MIN_SCORE = 50;
 export const THIN_MARKET_MIN_COUNT = 8;
 
 /**
- * Compute straight-line distance in miles between two coordinates using the Haversine formula.
+ * Compute straight-line distance in miles between two coordinates using the Haversine formula from valuation kernel.
  */
 export function calculateDistanceMiles(
   lat1: number,
@@ -31,18 +41,7 @@ export function calculateDistanceMiles(
   lat2: number,
   lon2: number
 ): number {
-  const EARTH_RADIUS_MILES = 3958.7613;
-  const toRad = (deg: number) => (deg * Math.PI) / 180;
-  const dLat = toRad(lat2 - lat1);
-  const dLon = toRad(lon2 - lon1);
-  const a =
-    Math.sin(dLat / 2) * Math.sin(dLat / 2) +
-    Math.cos(toRad(lat1)) *
-      Math.cos(toRad(lat2)) *
-      Math.sin(dLon / 2) *
-      Math.sin(dLon / 2);
-  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
-  return EARTH_RADIUS_MILES * c;
+  return distanceMiles(lat1, lon1, lat2, lon2);
 }
 
 export interface CompTargetSpec {
@@ -129,41 +128,36 @@ export interface ConditionEvaluationContext {
   activeMethod?: ConditionScoringMethod;
   ratePerPoint?: number;
   useCoverScores?: boolean;
+  spec?: ModelSpec;
 }
 
 /**
- * Score a single listing against the target spec using the exact rule:
- * score = 100 - 25*|bedrooms diff| - 8*|guests diff| - 10*|bathrooms diff| - 12*miles,
- * floored at 0 (blank bathrooms = no penalty).
- * Also computes condition score (1.0-6.0 or null if Not rated) and adjustedCompPrice.
+ * Score a single listing against the target spec using valuation kernel similarity and adjustComparable:
+ * score = 100 - weighted differences, floored at 0.
+ * Also computes condition score and adjustedCompPrice applied to sizeAdjustedPrice.
  */
 export function scoreListing(
   listing: Listing,
   target: CompTargetSpec,
   conditionContext?: ConditionEvaluationContext
 ): ScoredComp {
-  const miles = calculateDistanceMiles(
-    target.homePoint.lat,
-    target.homePoint.lon,
-    listing.lat,
-    listing.lon
-  );
+  const spec = conditionContext?.spec ?? ACTIVE_MODEL[target.roomType].spec;
+  const subject = targetToSubject(target);
+  const comp = listingToComparable(listing);
 
-  const bedroomsDiff = Math.abs(listing.bedrooms - target.bedrooms);
-  const guestsDiff = Math.abs(listing.accommodates - target.guests);
+  const { score, miles, diffs } = similarity(subject, comp, spec);
+  const { adjustedValue: sizeAdjustedPrice, lines: adjustmentLines } =
+    adjustComparable(subject, comp, spec);
+
+  const bedroomsDiff =
+    diffs.bedrooms ?? Math.abs(listing.bedrooms - target.bedrooms);
+  const guestsDiff =
+    diffs.guests ?? Math.abs(listing.accommodates - target.guests);
   const bathroomsDiff =
-    listing.bathrooms === null || Number.isNaN(listing.bathrooms)
+    diffs.bathrooms ??
+    (listing.bathrooms === null || Number.isNaN(listing.bathrooms)
       ? 0
-      : Math.abs(listing.bathrooms - target.bathrooms);
-
-  const rawScore =
-    100 -
-    25 * bedroomsDiff -
-    8 * guestsDiff -
-    10 * bathroomsDiff -
-    12 * miles;
-
-  const score = Math.max(0, rawScore);
+      : Math.abs(listing.bathrooms - target.bathrooms));
 
   const photos = conditionContext?.photos ?? [];
   const activeMethod = conditionContext?.activeMethod ?? "desk";
@@ -185,7 +179,7 @@ export function scoreListing(
   const rawPrice = listing.price;
   const { adjustedPrice, conditionMultiplier, isConditionAdjusted } =
     calculateAdjustedCompPrice(
-      rawPrice,
+      sizeAdjustedPrice,
       subjectSummary.activeScore,
       compSummary.activeScore,
       ratePerPoint,
@@ -199,6 +193,8 @@ export function scoreListing(
     ...listing,
     price: adjustedPrice,
     rawPrice,
+    sizeAdjustedPrice,
+    adjustmentLines,
     adjustedPrice,
     miles,
     score,
@@ -221,32 +217,17 @@ export function scoreListing(
 }
 
 /**
- * Compute percentile (0..1) using linear interpolation on a sorted array.
+ * Compute percentile (0..1) using linear interpolation on a sorted array (delegates to valuation.ts).
  */
 export function computePercentile(values: number[], p: number): number {
-  if (values.length === 0) return 0;
-  const sorted = [...values].sort((a, b) => a - b);
-  const pos = (sorted.length - 1) * p;
-  const base = Math.floor(pos);
-  const rest = pos - base;
-  if (sorted[base + 1] !== undefined) {
-    return sorted[base] + rest * (sorted[base + 1] - sorted[base]);
-  }
-  return sorted[base];
+  return percentile(values, p);
 }
 
 /**
- * Compute a { low: P25, expected: P50, high: P75 } RangeValue from an array of numbers.
+ * Compute a { low, expected, high } RangeValue from an array of numbers using estimateRange.
  */
-export function computeRangeFromValues(values: number[]): RangeValue {
-  if (values.length === 0) {
-    return { low: 0, expected: 0, high: 0 };
-  }
-  return {
-    low: computePercentile(values, 0.25),
-    expected: computePercentile(values, 0.5),
-    high: computePercentile(values, 0.75),
-  };
+export function computeRangeFromValues(values: number[], intervalScale = 1): RangeValue {
+  return estimateRange(values, intervalScale);
 }
 
 /**
@@ -371,11 +352,14 @@ export function selectCompsForTarget(
     (c) => c.isConditionAdjusted && c.conditionBasis === "cover"
   ).length;
 
-  const unadjustedNightlyRate = computeRangeFromValues(
-    comps.map((c) => c.rawPrice)
+  const spec = ACTIVE_MODEL[target.roomType].spec;
+  const unadjustedNightlyRate = estimateRange(
+    comps.map((c) => c.sizeAdjustedPrice),
+    spec.intervalScale
   );
-  const conditionAdjustedNightlyRate = computeRangeFromValues(
-    comps.map((c) => c.adjustedPrice)
+  const conditionAdjustedNightlyRate = estimateRange(
+    comps.map((c) => c.adjustedPrice),
+    spec.intervalScale
   );
   const conditionRateEffect: RangeValue = {
     low: conditionAdjustedNightlyRate.low - unadjustedNightlyRate.low,
@@ -489,11 +473,14 @@ export function createExclusionLogEntry(params: {
     useCoverScores,
   }).comps;
 
-  const beforePriceRange = computeRangeFromValues(
-    beforeComps.map((c) => c.price)
+  const spec = ACTIVE_MODEL[target.roomType].spec;
+  const beforePriceRange = estimateRange(
+    beforeComps.map((c) => c.price),
+    spec.intervalScale
   );
-  const afterPriceRange = computeRangeFromValues(
-    afterComps.map((c) => c.price)
+  const afterPriceRange = estimateRange(
+    afterComps.map((c) => c.price),
+    spec.intervalScale
   );
 
   const excludedListing = listings.find((l) => l.id === listingIdToExclude);

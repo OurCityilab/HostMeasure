@@ -4,6 +4,8 @@
  * Every quantitative output range is represented as a { low, expected, high } RangeValue.
  */
 
+import { AdjustmentLine } from "../engine/valuation";
+
 export interface RangeValue {
   low: number;
   expected: number;
@@ -37,6 +39,9 @@ export interface Listing {
   is_superhost: 0 | 1;
   host_listing_count: number;
   picture_url: string;
+  amenities: string[];
+  isCustom?: boolean;
+  cityWarning?: string;
 }
 
 export interface Coordinates {
@@ -53,6 +58,7 @@ export interface HomeProfile {
   customPin: Coordinates | null;
   isPrimaryResidence: boolean;
   hasRestriction: boolean;
+  amenities?: string[];
 }
 
 export type ExclusionReasonCode =
@@ -80,7 +86,8 @@ export type AiConfidence = "low" | "medium" | "high";
 export interface AiPhotoRating {
   photoId: string;
   room: PropertyRoomType;
-  score: ConditionScoreValue;
+  score: ConditionScoreValue | null;
+  isNa?: boolean;
   confidence: AiConfidence;
   observations: string[];
   ratedAt: string;
@@ -89,7 +96,8 @@ export interface AiPhotoRating {
 export interface DeskPhotoRating {
   photoId: string;
   room: PropertyRoomType;
-  score: ConditionScoreValue;
+  score: ConditionScoreValue | null;
+  isNa?: boolean;
   ratedAt: string;
 }
 
@@ -105,14 +113,18 @@ export interface PropertyPhoto {
   uploadedAt: string;
   source?: "upload" | "cover";
   unavailable?: boolean;
+  manuallyTagged?: boolean;
   aiRating?: {
-    score: ConditionScoreValue;
+    score: ConditionScoreValue | null;
+    isNa?: boolean;
     confidence: AiConfidence;
     observations: string[];
     ratedAt: string;
+    room?: PropertyRoomType;
   };
   deskRating?: {
-    score: ConditionScoreValue;
+    score: ConditionScoreValue | null;
+    isNa?: boolean;
     ratedAt: string;
   };
 }
@@ -120,6 +132,8 @@ export interface PropertyPhoto {
 export interface PropertyConditionSummary {
   propertyId: "subject" | string;
   photoCount: number;
+  aiRatedCount: number;
+  deskRatedCount: number;
   basis: "upload" | "cover" | "none";
   aiScore: number | null;
   deskScore: number | null;
@@ -152,7 +166,11 @@ export interface ScoredComp extends Listing {
   whyChosen: string;
   /** Original unadjusted nightly price from dataset */
   rawPrice: number;
-  /** Adjusted nightly price (equals rawPrice if either subject or comp is Not rated) */
+  /** Price after size adjustment to the subject */
+  sizeAdjustedPrice: number;
+  /** Line-item adjustments applied to this comp */
+  adjustmentLines: AdjustmentLine[];
+  /** Adjusted nightly price (equals sizeAdjustedPrice if either subject or comp is Not rated) */
   adjustedPrice: number;
   /** Condition score (1.0-6.0, 1 decimal) or null if Not rated */
   compConditionScore: number | null;
@@ -182,13 +200,20 @@ export interface ParsedPdfListing {
   roomType: RoomType;
   bedrooms: number;
   bathrooms: number;
-  guests: number;
+  guests: number | null;
   city: string;
   quotedPrice: number | null;
+  quotedPriceInfo?: {
+    total: number;
+    nights: number;
+    perNight: number;
+    label: string;
+  } | null;
   photos: PropertyPhoto[];
   isInDataset: boolean;
   matchedListing: Listing | null;
   matchType: "id" | "title" | "none";
+  matchStatusMessage: string;
   fileNames: string[];
   cityWarning?: string;
 }

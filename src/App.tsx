@@ -13,6 +13,7 @@ import {
   INITIAL_HOME_PROFILE,
   SAMPLE_HOME_CASE,
 } from "../config/assumptions";
+import { SAMPLE_OWNER_AMENITIES } from "../config/amenities";
 import { DATA_SNAPSHOT_METADATA } from "../config/dataSource";
 import { DC_RULES } from "../config/dcRules";
 import {
@@ -58,6 +59,7 @@ export default function App() {
   const [dataSourceLabel, setDataSourceLabel] = useState<string>("Loading...");
   const [dataWarning, setDataWarning] = useState<string | null>(null);
   const [uploadError, setUploadError] = useState<string | null>(null);
+  const [isDraggingCsv, setIsDraggingCsv] = useState<boolean>(false);
   const [sampleLoadedToast, setSampleLoadedToast] = useState<boolean>(false);
 
   // User workflow state
@@ -66,7 +68,12 @@ export default function App() {
   const [onlyHostsLikeMe, setOnlyHostsLikeMe] = useState<boolean>(false);
   const [excludedIds, setExcludedIds] = useState<string[]>([]);
   const [pinnedIds, setPinnedIds] = useState<string[]>([]);
+  const [customListings, setCustomListings] = useState<Listing[]>([]);
   const [subjectListingId, setSubjectListingId] = useState<string | null>(null);
+
+  // Owner Amenities state
+  const [ownerAmenities, setOwnerAmenities] = useState<string[]>([]);
+  const [amenitiesBanner, setAmenitiesBanner] = useState<string | null>(null);
 
   // Revised 1-6 Condition state
   const [allPhotos, setAllPhotos] = useState<PropertyPhoto[]>([]);
@@ -143,9 +150,14 @@ export default function App() {
     [home.isPrimaryResidence, home.hasRestriction]
   );
 
+  const allListings = useMemo(
+    () => [...customListings, ...listings],
+    [customListings, listings]
+  );
+
   const compSelections = useMemo(
     () =>
-      selectBothPathComps(listings, home, {
+      selectBothPathComps(allListings, home, {
         onlyHostsLikeMe,
         excludedIds,
         pinnedIds,
@@ -155,7 +167,7 @@ export default function App() {
         useCoverScores,
       }),
     [
-      listings,
+      allListings,
       home,
       onlyHostsLikeMe,
       excludedIds,
@@ -275,6 +287,8 @@ export default function App() {
     setActiveScoringMethod("desk");
     setRatePerPoint(DEFAULT_CONDITION_RATE_PER_POINT);
     setUseCoverScores(true);
+    setOwnerAmenities([...SAMPLE_OWNER_AMENITIES]);
+    setAmenitiesBanner(null);
     setAssumptions({ ...DEFAULT_COST_ASSUMPTIONS });
     lastLoggedPriceRef.current = {};
     setSampleLoadedToast(true);
@@ -288,7 +302,9 @@ export default function App() {
 
   const handleUpdatePhotoRoom = (photoId: string, room: PropertyRoomType) => {
     setAllPhotos((prev) =>
-      prev.map((p) => (p.photoId === photoId ? { ...p, room } : p))
+      prev.map((p) =>
+        p.photoId === photoId ? { ...p, room, manuallyTagged: true } : p
+      )
     );
   };
 
@@ -306,7 +322,8 @@ export default function App() {
   const handleApplyAiRating = (
     photoId: string,
     rating: {
-      score: ConditionScoreValue;
+      score: ConditionScoreValue | null;
+      isNa?: boolean;
       confidence: AiConfidence;
       observations: string[];
       ratedAt: string;
@@ -314,15 +331,31 @@ export default function App() {
     }
   ) => {
     setAllPhotos((prev) =>
-      prev.map((p) =>
-        p.photoId === photoId
-          ? {
-              ...p,
-              aiRating: rating,
-              room: rating.room ?? p.room,
-            }
-          : p
-      )
+      prev.map((p) => {
+        if (p.photoId !== photoId) return p;
+
+        // When /api/analyze-single-photo returns a room for an untagged photo, save it on the photo
+        // so the AI table, thumbnails, desk review, and weighted condition score all use it.
+        // A room set by hand is never overwritten.
+        const isUntagged =
+          !p.room ||
+          p.room === "Untagged" ||
+          p.room === "Listing photo (room not tagged)";
+        const shouldApplyRoom =
+          !p.manuallyTagged &&
+          isUntagged &&
+          rating.room &&
+          rating.room !== "Untagged" &&
+          rating.room !== "Listing photo (room not tagged)";
+
+        const nextRoom = shouldApplyRoom ? rating.room! : p.room;
+
+        return {
+          ...p,
+          aiRating: rating,
+          room: nextRoom,
+        };
+      })
     );
 
     // If no desk scores exist yet, switch active method to AI
@@ -331,13 +364,35 @@ export default function App() {
       setActiveScoringMethod("ai");
     }
 
+    const scoreDisplay =
+      rating.score === null || rating.isNa ? "N/A" : `${rating.score}/6`;
     setAdjustmentsLog((prev) => [
       ...prev,
       {
         timestamp: rating.ratedAt,
         listingId: photoId,
         listingName: `Photo ${photoId}`,
-        reason: `Photo rating: ${photoId} | Method: AI analysis | Score: ${rating.score}/6 | Time: ${rating.ratedAt}`,
+        reason: `Photo rating: ${photoId} | Method: AI analysis | Score: ${scoreDisplay} | Time: ${rating.ratedAt}`,
+        effect: ZERO_EFFECT,
+      },
+    ]);
+  };
+
+  const handleClearAllAiRatings = () => {
+    setAllPhotos((prev) =>
+      prev.map((p) => ({
+        ...p,
+        aiRating: undefined,
+      }))
+    );
+    const timestamp = new Date().toISOString();
+    setAdjustmentsLog((prev) => [
+      ...prev,
+      {
+        timestamp,
+        listingId: "clear-ai-ratings",
+        listingName: "AI Ratings Reset",
+        reason: "Reset all AI condition scores for re-rating",
         effect: ZERO_EFFECT,
       },
     ]);
@@ -346,22 +401,32 @@ export default function App() {
   // Method 2: Apply Desk Review Rating
   const handleApplyDeskRating = (
     photoId: string,
-    score: ConditionScoreValue,
+    score: ConditionScoreValue | null,
     ratedAt: string
   ) => {
     setAllPhotos((prev) =>
       prev.map((p) =>
-        p.photoId === photoId ? { ...p, deskRating: { score, ratedAt } } : p
+        p.photoId === photoId
+          ? {
+              ...p,
+              deskRating: {
+                score,
+                isNa: score === null,
+                ratedAt,
+              },
+            }
+          : p
       )
     );
 
+    const scoreDisplay = score === null ? "N/A" : `${score}/6`;
     setAdjustmentsLog((prev) => [
       ...prev,
       {
         timestamp: ratedAt,
         listingId: photoId,
         listingName: `Photo ${photoId}`,
-        reason: `Photo rating: ${photoId} | Method: Desk review | Score: ${score}/6 | Time: ${ratedAt}`,
+        reason: `Photo rating: ${photoId} | Method: Desk review | Score: ${scoreDisplay} | Time: ${ratedAt}`,
         effect: ZERO_EFFECT,
       },
     ]);
@@ -495,8 +560,10 @@ export default function App() {
     const updatedHome: Partial<HomeProfile> = {
       bedrooms: parsed.bedrooms,
       bathrooms: parsed.bathrooms,
-      guests: parsed.guests,
     };
+    if (parsed.guests !== null) {
+      updatedHome.guests = parsed.guests;
+    }
 
     if (parsed.matchedListing) {
       updatedHome.neighbourhood = parsed.matchedListing.neighbourhood;
@@ -505,6 +572,11 @@ export default function App() {
         lon: parsed.matchedListing.lon,
       };
       setSubjectListingId(parsed.matchedListing.id);
+
+      if (parsed.matchedListing.amenities && parsed.matchedListing.amenities.length > 0) {
+        setOwnerAmenities(parsed.matchedListing.amenities);
+        setAmenitiesBanner("Filled from your listing. Check and correct.");
+      }
 
       // Requirement 15: Exclude this listing from comps
       setExcludedIds((prev) =>
@@ -611,10 +683,82 @@ export default function App() {
     ]);
   };
 
-  const handleCsvFileChange = async (
-    event: React.ChangeEvent<HTMLInputElement>
+  const handleAddCustomComp = (
+    customListing: Listing,
+    photos: PropertyPhoto[]
   ) => {
-    const file = event.target.files?.[0];
+    const compId = customListing.id;
+    const timestamp = new Date().toISOString();
+
+    const pathId =
+      customListing.room_type === "entire" ? "pathA" : "pathB";
+    const beforeSelection =
+      pathId === "pathA" ? compSelections.pathA : compSelections.pathB;
+    const beforeMedian =
+      beforeSelection.conditionAdjustedNightlyRate.expected;
+
+    // 1. Add/update in customListings
+    const nextCustom = [
+      ...customListings.filter((l) => l.id !== compId),
+      customListing,
+    ];
+    setCustomListings(nextCustom);
+
+    // 2. Add to pinnedIds
+    const nextPinned = pinnedIds.includes(compId)
+      ? pinnedIds
+      : [...pinnedIds, compId];
+    setPinnedIds(nextPinned);
+
+    // 3. Remove from excludedIds if it was excluded
+    setExcludedIds((prev) => prev.filter((id) => id !== compId));
+
+    // 4. Attach imported photos to this comp
+    const otherPhotos = allPhotos.filter((p) => p.propertyId !== compId);
+    const compPhotos = photos.map((p) => ({
+      ...p,
+      propertyId: compId,
+    }));
+    const nextPhotos = [...otherPhotos, ...compPhotos];
+    setAllPhotos(nextPhotos);
+
+    // 5. Compute median rate effect with combined listings
+    const combined = [...nextCustom, ...listings];
+    const targetSpec = getPathTargetSpec(home, combined, pathId);
+    const afterSelection = selectCompsForTarget(combined, targetSpec, {
+      onlyHostsLikeMe,
+      excludedIds: excludedIds.filter((id) => id !== compId),
+      pinnedIds: nextPinned,
+      photos: nextPhotos,
+      activeMethod: activeScoringMethod,
+      ratePerPoint,
+      useCoverScores,
+    });
+    const afterMedian = afterSelection.conditionAdjustedNightlyRate.expected;
+    const diffMedian = afterMedian - beforeMedian;
+
+    setAdjustmentsLog((prev) => [
+      ...prev,
+      {
+        timestamp,
+        listingId: compId,
+        listingName: customListing.name,
+        pathId,
+        reason: `Custom comparison added (not in dataset) - $${Math.round(
+          customListing.price
+        )}/night`,
+        effect: {
+          low: 0,
+          expected: diffMedian,
+          high: 0,
+        },
+        previousMedianPrice: beforeMedian,
+        newMedianPrice: afterMedian,
+      },
+    ]);
+  };
+
+  const handleUploadListingsFile = async (file: File) => {
     if (!file) return;
 
     setUploadError(null);
@@ -623,11 +767,10 @@ export default function App() {
       const parsed = await parseListingsCsvFile(file);
       setListings(parsed);
       setIsFallbackSample(false);
-      setDataSourceLabel(
-        `${file.name} (${parsed.length.toLocaleString()} active listings)`
-      );
+      setDataSourceLabel(file.name);
       setDataWarning(null);
     } catch (err) {
+      // Retain previous listings on error, only set uploadError message
       setUploadError(
         err instanceof Error ? err.message : "Failed to parse uploaded CSV."
       );
@@ -636,6 +779,37 @@ export default function App() {
       if (fileInputRef.current) {
         fileInputRef.current.value = "";
       }
+    }
+  };
+
+  const handleCsvFileChange = async (
+    event: React.ChangeEvent<HTMLInputElement>
+  ) => {
+    const file = event.target.files?.[0];
+    if (file) {
+      await handleUploadListingsFile(file);
+    }
+  };
+
+  const handleCsvDragOver = (e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setIsDraggingCsv(true);
+  };
+
+  const handleCsvDragLeave = (e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setIsDraggingCsv(false);
+  };
+
+  const handleCsvDrop = (e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setIsDraggingCsv(false);
+    if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
+      const file = e.dataTransfer.files[0];
+      handleUploadListingsFile(file);
     }
   };
 
@@ -655,19 +829,21 @@ export default function App() {
 
   return (
     <div className="min-h-screen flex flex-col bg-white text-slate-900">
-      {/* Top Bar Contract: 3 zones separated by gap-8 */}
-      <header className="sticky top-0 z-30 bg-white/95 backdrop-blur-xs border-b border-slate-200 px-6 py-3.5">
-        <div className="max-w-7xl mx-auto flex items-center justify-between gap-8">
-          {/* Zone 1: Single text element wordmark */}
-          <a
-            href="#top"
-            className="text-lg font-bold tracking-tight text-slate-900 whitespace-nowrap shrink-0"
-          >
-            HostMeasure DC
-          </a>
+      {/* Top Bar Contract: 3 zones separated by gap-8 with Permanent Data Control */}
+      <header className="sticky top-0 z-30 bg-white/95 backdrop-blur-xs border-b border-slate-200 px-4 sm:px-6 py-3">
+        <div className="max-w-7xl mx-auto flex flex-col md:flex-row md:items-center justify-between gap-3 md:gap-6">
+          <div className="flex items-center justify-between gap-4">
+            {/* Zone 1: Single text element wordmark */}
+            <a
+              href="#top"
+              className="text-lg font-bold tracking-tight text-slate-900 whitespace-nowrap shrink-0"
+            >
+              HostMeasure DC
+            </a>
+          </div>
 
           {/* Zone 2: 4 single-line navigation links */}
-          <nav className="hidden md:flex items-center gap-6 text-sm font-medium text-slate-600">
+          <nav className="hidden lg:flex items-center gap-5 text-sm font-medium text-slate-600">
             <button
               type="button"
               onClick={() => scrollToStep(1)}
@@ -714,18 +890,76 @@ export default function App() {
             </button>
           </nav>
 
-          {/* Zone 3: 1 primary action */}
-          <div className="flex items-center gap-3 shrink-0">
+          {/* Zone 3: Permanent Data Control + Primary Action */}
+          <div className="flex flex-wrap items-center gap-3 shrink-0">
+            {/* Permanent Data Control: visible whether or not default data loaded */}
+            <div
+              onDragOver={handleCsvDragOver}
+              onDragLeave={handleCsvDragLeave}
+              onDrop={handleCsvDrop}
+              className={`flex items-center gap-2 px-3 py-1.5 rounded-lg border text-xs transition-colors ${
+                isDraggingCsv
+                  ? "border-emerald-600 bg-emerald-50 text-emerald-950 ring-2 ring-emerald-500/30"
+                  : "border-slate-200 bg-slate-50/90 text-slate-700 hover:border-slate-300"
+              }`}
+            >
+              <Database className="w-3.5 h-3.5 text-slate-500 shrink-0" />
+              <div className="font-mono tabular-nums leading-tight">
+                <span className="font-semibold text-slate-900">
+                  {listings.length.toLocaleString()} listings
+                </span>
+                <span className="text-slate-400 mx-1">·</span>
+                <span className="text-slate-600">
+                  loaded from {dataSourceLabel}
+                </span>
+              </div>
+              <button
+                type="button"
+                onClick={() => fileInputRef.current?.click()}
+                className="inline-flex items-center gap-1 px-2.5 py-1 rounded font-semibold text-[11px] bg-white border border-slate-300 text-slate-800 hover:bg-slate-100 hover:border-slate-400 transition-colors shadow-2xs cursor-pointer shrink-0 ml-1"
+                title="Upload or drop Inside Airbnb CSV"
+              >
+                <Upload className="w-3 h-3 text-slate-600" />
+                <span>Upload listings CSV</span>
+              </button>
+              <input
+                ref={fileInputRef}
+                type="file"
+                accept=".csv,text/csv"
+                onChange={handleCsvFileChange}
+                className="hidden"
+              />
+            </div>
+
             <button
               type="button"
               onClick={handleLoadSampleCase}
-              className="px-4 py-2 text-xs font-semibold text-white bg-emerald-900 rounded-lg hover:bg-emerald-800 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+              className="px-3.5 py-1.5 text-xs font-semibold text-white bg-emerald-900 rounded-lg hover:bg-emerald-800 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
             >
               Load sample case
             </button>
           </div>
         </div>
       </header>
+
+      {/* CSV Validation / Upload Error Banner (keeps previous data) */}
+      {uploadError && (
+        <div className="bg-red-50 border-b border-red-200 px-6 py-2.5">
+          <div className="max-w-7xl mx-auto flex items-center justify-between gap-3 text-xs text-red-800">
+            <div className="flex items-center gap-2">
+              <AlertCircle className="w-4 h-4 text-red-600 shrink-0" />
+              <span><strong>CSV Upload Error:</strong> {uploadError}</span>
+            </div>
+            <button
+              type="button"
+              onClick={() => setUploadError(null)}
+              className="text-xs text-red-700 hover:text-red-950 font-semibold cursor-pointer underline shrink-0"
+            >
+              Dismiss
+            </button>
+          </div>
+        </div>
+      )}
 
       {/* Main Content Container */}
       <main
@@ -766,24 +1000,14 @@ export default function App() {
               </button>
 
               {(isFallbackSample || !!dataWarning) && (
-                <>
-                  <input
-                    ref={fileInputRef}
-                    type="file"
-                    accept=".csv,text/csv"
-                    onChange={handleCsvFileChange}
-                    className="hidden"
-                    id="csv-upload-input"
-                  />
-                  <button
-                    type="button"
-                    onClick={() => fileInputRef.current?.click()}
-                    className="inline-flex items-center gap-2 px-4 py-3 text-sm font-semibold text-slate-800 bg-white hover:bg-slate-100 border border-slate-300 rounded-lg transition-colors cursor-pointer whitespace-nowrap shrink-0"
-                  >
-                    <Upload className="w-4 h-4 text-emerald-800" />
-                    Upload listings CSV
-                  </button>
-                </>
+                <button
+                  type="button"
+                  onClick={() => fileInputRef.current?.click()}
+                  className="inline-flex items-center gap-2 px-4 py-3 text-sm font-semibold text-slate-800 bg-white hover:bg-slate-100 border border-slate-300 rounded-lg transition-colors cursor-pointer whitespace-nowrap shrink-0"
+                >
+                  <Upload className="w-4 h-4 text-emerald-800" />
+                  Upload listings CSV
+                </button>
               )}
             </div>
           </div>
@@ -951,6 +1175,10 @@ export default function App() {
           onRemovePhoto={handleRemovePhoto}
           datasetListings={listings}
           onApplyPdfHome={handleApplyPdfHome}
+          ownerAmenities={ownerAmenities}
+          onChangeOwnerAmenities={setOwnerAmenities}
+          amenitiesBanner={amenitiesBanner}
+          onDismissAmenitiesBanner={() => setAmenitiesBanner(null)}
         />
 
         {/* STEP 2 - AM I ALLOWED? */}
@@ -970,6 +1198,7 @@ export default function App() {
           onToggleOnlyHostsLikeMe={setOnlyHostsLikeMe}
           onExcludeComp={handleExcludeComp}
           onAddPinnedComp={handleAddPinnedComp}
+          onAddCustomComp={handleAddCustomComp}
           adjustmentsLog={adjustmentsLog}
           excludedCount={excludedIds.length}
           onResetExclusions={handleResetExclusions}
@@ -985,10 +1214,13 @@ export default function App() {
           onRemovePhoto={handleRemovePhoto}
           onMarkPhotoUnavailable={handleMarkPhotoUnavailable}
           onApplyAiRating={handleApplyAiRating}
+          onClearAllAiRatings={handleClearAllAiRatings}
           onApplyDeskRating={handleApplyDeskRating}
           onLogDeskReviewStart={handleLogDeskReviewStart}
           onDeskReviewCompleted={handleDeskReviewCompleted}
           onLogCustomAdjustment={handleLogCustomAdjustment}
+          ownerAmenities={ownerAmenities}
+          onScrollToStep1={() => scrollToStep(1)}
         />
 
         {/* STEP 4 - MY NUMBERS */}
@@ -1002,6 +1234,8 @@ export default function App() {
             setAssumptions({ ...DEFAULT_COST_ASSUMPTIONS })
           }
           onOpenAuditDrawer={() => setIsAuditDrawerOpen(true)}
+          ownerAmenities={ownerAmenities}
+          compSelectionA={compSelections.pathA}
         />
       </main>
 
@@ -1017,6 +1251,7 @@ export default function App() {
         adjustmentsLog={adjustmentsLog}
         totalDatasetRows={listings.length}
         isFallbackSample={isFallbackSample}
+        customListings={customListings}
       />
 
       {/* Footer with exact required Inside Airbnb citation */}
